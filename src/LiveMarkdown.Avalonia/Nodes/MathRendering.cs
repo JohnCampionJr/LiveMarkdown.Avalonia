@@ -3,12 +3,12 @@ using Avalonia.Controls;
 namespace LiveMarkdown.Avalonia;
 
 /// <summary>
-/// Tweed fork addition: the seam an app plugs a math typesetter into.
+/// Fork addition: the seam an app plugs a math typesetter into.
 ///
 /// The markdown fork deliberately does NOT depend on a math engine. It knows how to show TeX source (see
 /// <see cref="MathInlineNode"/>), and if an app supplies a view factory here it will show typeset math instead.
 /// Same shape as the other app seams in this fork — <c>MarkdownRenderer.ConfigurePipeline</c> and
-/// <c>MarkdownRenderer.WidgetResolver</c> — and for the same reason: the vendored renderer stays generic, Tweed
+/// <c>MarkdownRenderer.WidgetResolver</c> — and for the same reason: the renderer stays generic, the host
 /// owns the dependency.
 /// </summary>
 public static class MathRendering
