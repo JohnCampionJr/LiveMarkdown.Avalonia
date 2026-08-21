@@ -6,7 +6,7 @@ using Inline = Avalonia.Controls.Documents.Inline;
 namespace LiveMarkdown.Avalonia;
 
 /// <summary>
-/// Tweed fork addition: a node for inline math (<c>$…$</c>).
+/// Fork addition: a node for inline math (<c>$…$</c>).
 ///
 /// The pipeline is built with <c>UseAdvancedExtensions()</c>, which switches Markdig's math extension ON — so
 /// <c>$E=mc^2$</c> has always parsed to a <see cref="MathInline"/>. Upstream has no node for it, and the

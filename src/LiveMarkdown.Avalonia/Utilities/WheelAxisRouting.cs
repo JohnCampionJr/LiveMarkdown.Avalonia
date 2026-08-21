@@ -8,7 +8,7 @@ using Avalonia.VisualTree;
 namespace LiveMarkdown.Avalonia;
 
 /// <summary>
-/// TWEED FORK: dominant-axis wheel routing for the HORIZONTAL scrollers inside rendered markdown
+/// FORK: dominant-axis wheel routing for the HORIZONTAL scrollers inside rendered markdown
 /// (tables, code blocks).
 ///
 /// <para>Avalonia's ScrollViewer maps a vertical wheel onto the horizontal axis when horizontal is the only

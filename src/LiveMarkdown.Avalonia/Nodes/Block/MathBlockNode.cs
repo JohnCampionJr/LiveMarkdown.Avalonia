@@ -5,7 +5,7 @@ using Markdig.Extensions.Mathematics;
 namespace LiveMarkdown.Avalonia;
 
 /// <summary>
-/// Tweed fork addition: a node for display math (<c>$$…$$</c>).
+/// Fork addition: a node for display math (<c>$$…$$</c>).
 ///
 /// Unlike <see cref="MathInlineNode"/> this is not fixing an invisible hole: Markdig's <see cref="MathBlock"/>
 /// derives from <c>FencedCodeBlock</c> → <c>CodeBlock</c>, so upstream's <c>CodeBlockNode</c> already claimed it

@@ -257,7 +257,7 @@ public class CodeBlock : TemplatedControl
         CodeTextBlock.SourceSpan = SourceSpan;
 
         _scrollViewer = e.NameScope.Find<ScrollViewer>(ScrollViewerName);
-        // TWEED FORK: a vertical wheel over a wide code block keeps scrolling the transcript.
+        // FORK: a vertical wheel over a wide code block keeps scrolling the document.
         if (_scrollViewer is not null) WheelAxisRouting.Attach(_scrollViewer);
 
         if (e.NameScope.Find<Button>(CopyButtonName) is { } copyButton)

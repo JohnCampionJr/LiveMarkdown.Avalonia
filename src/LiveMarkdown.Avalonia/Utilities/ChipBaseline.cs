@@ -4,7 +4,7 @@ using Avalonia.VisualTree;
 namespace LiveMarkdown.Avalonia;
 
 /// <summary>
-/// TWEED PATCH (see FORK-CHANGES.md): keeps an inline chip's <see cref="TextBlock.BaselineOffsetProperty"/> in
+/// FORK: keeps an inline chip's <see cref="TextBlock.BaselineOffsetProperty"/> in
 /// sync with the real baseline of the text inside it.
 ///
 /// <para>An <see cref="Avalonia.Controls.Documents.InlineUIContainer"/> becomes an <c>EmbeddedControlRun</c>
