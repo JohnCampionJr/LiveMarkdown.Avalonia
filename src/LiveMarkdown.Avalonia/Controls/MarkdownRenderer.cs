@@ -6,6 +6,8 @@ using System.Windows.Input;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Metadata;
+using Avalonia.Interactivity;
+using Avalonia.Input;
 using Avalonia.Logging;
 using Avalonia.Threading;
 using Markdig;
@@ -81,7 +83,64 @@ public partial class MarkdownRenderer : Control
             if (value is not null)
             {
                 value.Changed += CommitChange;
-                CommitChange(new ObservableStringBuilderChangedEventArgs(0, value.Length, value.Length, value.Version));
+
+                // FORK: a rebind is parsed SYNCHRONOUSLY, right here, and invalidates nothing.
+                //
+                // Two separate hazards, and both need this. A builder swap is what a VIRTUALIZING panel does to
+                // a recycled container — from inside the layout pass that is measuring it.
+                //
+                // 1. Don't invalidate. CommitChange ends in InvalidateArrange(), and invalidating layout from
+                //    inside the pass measuring you is a cycle:
+                //        recycle -> rebind -> InvalidateArrange -> layout pass -> recycle -> ...
+                //    Diagnosed from a managed stack of a live hang: LayoutManager.Measure three deep inside one
+                //    ExecuteLayoutPass, VirtualizingStackPanel.MeasureOverride calling RecycleAllElements every
+                //    pass. Mutating the node tree below already invalidates measure the ordinary way.
+                //
+                // 2. Don't DEFER either — this is the half that reads as "the scroll is fighting me". Deferring
+                //    the parse (posting it, or letting the async render loop take it) means the row measures at
+                //    PLACEHOLDER height and then grows when the parse lands. Under a virtualizing panel that
+                //    growth is a layout loop with a period of two: grown rows shift which item contains the
+                //    viewport's start offset, the anchor flips, and the flipped window recycles fresh renderers
+                //    whose parses land and shift it back. Parsing inline makes the height right on FIRST
+                //    measure, so nothing grows and the oscillation cannot start.
+                //
+                // A REBIND IS NOT STREAMING. The async path above is untouched and keeps its real purpose —
+                // incremental appends while a message streams. The cost here is one Markdig parse per
+                // realization, sub-millisecond for a typical message, on content the user is about to see.
+                var snapshot = value.CaptureSnapshot();
+                var rebind = new ObservableStringBuilderChangedEventArgs(0, value.Length, value.Length, snapshot.Version);
+
+                // ...but ONLY while attached, which is the case this exists for: a recycled container is rebound
+                // from inside a layout pass, and it is already in the tree. Parsing inline while DETACHED builds
+                // the inlines before there is a styled tree to build them into, and Avalonia styles a logical
+                // child when it enters one — so the chips would render with their property DEFAULTS and no
+                // stylesheet would ever reach them. Measured exactly that: a renderer whose MarkdownBuilder is
+                // assigned in an object initializer (before Show()) produced CodeInline runs stuck at the
+                // registered Padding of 2,0 with the host app's sheet never applied.
+                //
+                // Detached, none of the recycle hazards apply and there is nothing to race, so record the change
+                // and let OnAttachedToVisualTree's EnsureRenderLoopStarted render it once there is a tree.
+                if (VisualRoot is null)
+                {
+                    pendingChange = rebind;
+                    return;
+                }
+
+                pendingChange = null;
+                documentNode.Update(
+                    documentNode,
+                    Markdown.Parse(snapshot.Text, sharedPipeline.Value),
+                    rebind,
+                    CancellationToken.None);
+                //
+                // NOT InvalidateTextBlockCache()/ScheduleRenderedTextStateRefresh(): BOTH end in
+                // InvalidateArrange(), which is the very thing this path exists to avoid — calling either from
+                // a rebind puts the recycle cycle straight back, through a different door. Drop the caches and
+                // record the projection version directly; ArrangeCore already calls RefreshRenderedTextState,
+                // so the pass that is arranging this container picks it up with no invalidation at all.
+                _textBlocksCache = null;
+                _selectableBlocksCache = null;
+                _pendingRenderedTextStateVersion = snapshot.Version;
             }
         }
     }
@@ -206,7 +265,23 @@ public partial class MarkdownRenderer : Control
     private MarkdownTextProjection? _renderedTextProjection;
 
     private readonly DocumentNode documentNode;
-    private readonly MarkdownPipeline pipeline = CreatePipeline();
+    // FORK: ONE pipeline for the process, not one per renderer.
+    //
+    // Upstream builds a whole pipeline per MarkdownRenderer — i.e. per message, retained for that
+    // message's lifetime — while ConfigurePipeline is already documented as "set before any instances
+    // are created", so every copy is byte-identical. Measured (Markdig 1.3.2, .NET 10, 18-core):
+    // 26 us and 38 KB retained per renderer. 2,500 messages open across a chat's lanes = 91 MB of
+    // duplicated parser tables and +8.3 ms on every gen2 collection, which stops the UI thread.
+    // Shared: 0.8 MB, +0.0 ms.
+    //
+    // LAZY IS LOAD-BEARING: `ConfigurePipeline += ...` is itself the first touch of this type, so a
+    // plain static initializer would build the pipeline before that handler finished registering and
+    // silently drop every extension the host meant to add.
+    //
+    // Safe because concurrent parses share parser INSTANCES only, which is Markdig's supported usage.
+    // Any extension added through ConfigurePipeline must therefore be free of instance state.
+    private static readonly Lazy<MarkdownPipeline> sharedPipeline =
+        new(CreatePipeline, LazyThreadSafetyMode.ExecutionAndPublication);
 
     /// <summary>
     /// Optional callback to configure the Markdig pipeline before it is built.
@@ -255,6 +330,19 @@ public partial class MarkdownRenderer : Control
         VisualChildren.Add(documentNode.Control);
 
         AddHandler(KeyDownEvent, HandleKeyDown);
+        // FORK: OS-standard "a left press drops the selection". Tunnel phase with handledEventsToo,
+        // because a press landing on something that HANDLES it — a button, an expander chevron, an
+        // embedded widget — never reaches the bubbling selection logic, and the old highlight would
+        // just sit there.
+        AddHandler(PointerPressedEvent, ClearSelectionOnPress, RoutingStrategies.Tunnel, handledEventsToo: true);
+    }
+
+    private void ClearSelectionOnPress(object? sender, PointerPressedEventArgs e)
+    {
+        if (!e.GetCurrentPoint(this).Properties.IsLeftButtonPressed) return;
+        if (string.IsNullOrEmpty(SelectedText)) return;
+        ClearSelection(GetAllSelectableBlocksInScope(GetSelectionScopeRoot()));
+        UpdateCanCopy();
     }
 
     /// <inheritdoc/>
@@ -316,7 +404,7 @@ public partial class MarkdownRenderer : Control
                 }
 
                 var time = DateTimeOffset.UtcNow;
-                var document = await Task.Run(() => Markdown.Parse(currentSnapshot.Text, pipeline), cancellationToken);
+                var document = await Task.Run(() => Markdown.Parse(currentSnapshot.Text, sharedPipeline.Value), cancellationToken);
 
                 cancellationToken.ThrowIfCancellationRequested();
                 Dispatcher.UIThread.VerifyAccess();
