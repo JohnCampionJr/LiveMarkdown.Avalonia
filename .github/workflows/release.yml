@@ -1,0 +1,139 @@
+# Publishes this fork as Avalloy.LiveMarkdown and Avalloy.LiveMarkdown.Mermaid.
+#
+# Lives on `patches` and only ever runs there. `main` is a pristine mirror of upstream and every PR
+# branch is cut from it, so a file that exists only here cannot reach a PR back to upstream.
+#
+# TWO packages, and that is not a convenience. Upstream's Mermaid package declares a dependency on
+# upstream's CORE, so a consumer taking it beside a republished core ends up with two assemblies named
+# LiveMarkdown.Avalonia in front of the compiler — and when the versions happen to match, MSBuild
+# reports no conflict and silently picks one. Building Mermaid here makes its dependency resolve to
+# ours, so upstream's core never enters the graph at all.
+name: Release
+
+# Triggered by a TAG, not workflow_dispatch: dispatch requires the workflow to live on the DEFAULT
+# branch, and the default here is `main`, the pristine upstream mirror this file must never touch.
+#
+#   git tag dryrun/2.3.3 && git push origin dryrun/2.3.3    # build, verify, upload — no push
+#   git tag release/2.3.3 && git push origin release/2.3.3  # the same, then publish
+on:
+  push:
+    tags:
+      - 'release/*'
+      - 'dryrun/*'
+
+permissions:
+  contents: read
+
+env:
+  CORE_ID: Avalloy.LiveMarkdown
+  MERMAID_ID: Avalloy.LiveMarkdown.Mermaid
+  FEED: https://nuget.cloudsmith.io/jcamp/packages/v3/index.json
+
+jobs:
+  publish:
+    name: pack and push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # the tag checks below need history
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.x'
+
+      # Version comes from the tag. The UPSTREAM tag is DERIVED, not supplied — the nearest tag on the
+      # merge-base with the mirror, which is the same rule avalloy's dev-link uses locally. Deriving
+      # it means it follows a merge with nothing to remember, and forgetting to bump it by hand is not
+      # a build failure but a runtime assembly-load failure in a consumer months later.
+      #
+      # The tag must also sit on the maintained line: tagging `main` would publish UPSTREAM's code
+      # under our package ids, and nothing about the result would look wrong afterwards.
+      - name: Read the tag, derive the upstream one, check the branch
+        id: v
+        run: |
+          version="${GITHUB_REF_NAME#*/}"
+          [ -n "$version" ] || { echo "::error::tag '$GITHUB_REF_NAME' carries no version"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          git fetch --quiet origin patches main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/patches \
+            || { echo "::error::$GITHUB_SHA is not on patches — refusing to publish"; exit 1; }
+
+          git fetch --tags --quiet https://github.com/DearVa/LiveMarkdown.Avalonia.git || true
+          base=$(git merge-base HEAD origin/main)
+          upstream=$(git describe --tags --abbrev=0 "$base" 2>/dev/null | sed 's/^v//')
+          [ -n "$upstream" ] || { echo "::error::no upstream tag on the merge-base with the mirror"; exit 1; }
+          echo "upstream=$upstream" >> "$GITHUB_OUTPUT"
+          echo "package $version, assembly pinned to upstream v$upstream"
+
+      - name: Test
+        run: dotnet test tests/LiveMarkdown.Avalonia.Tests/*.csproj --configuration Release
+
+      # The ids CANNOT be plain -p:PackageId overrides: Mermaid references the core by
+      # ProjectReference, so one global PackageId renames both projects to the same id and the package
+      # ends up declaring a dependency on itself. The branch names each id by its own property,
+      # empty by default so a plain clone packs exactly as upstream.
+      #
+      # ForkAssemblyVersion pins the ASSEMBLY to the upstream tag while the PACKAGE moves on its own
+      # line. Two same-named assemblies pass MSBuild's conflict resolver only when their versions are
+      # identical — ahead is as fatal as behind.
+      #
+      # Keep these three properties in step with avalloy's build/dev-link.cs.
+      - name: Pack
+        run: |
+          for proj in src/LiveMarkdown.Avalonia/LiveMarkdown.Avalonia.csproj \
+                      src/LiveMarkdown.Avalonia.Mermaid/LiveMarkdown.Avalonia.Mermaid.csproj; do
+            dotnet pack "$proj" \
+              --configuration Release \
+              --output artifacts \
+              -p:Version=${{ steps.v.outputs.version }} \
+              -p:ForkCorePackageId=${{ env.CORE_ID }} \
+              -p:ForkMermaidPackageId=${{ env.MERMAID_ID }} \
+              -p:ForkAssemblyVersion=${{ steps.v.outputs.upstream }}.0
+          done
+
+      - name: Verify the package contents
+        run: |
+          core=artifacts/${{ env.CORE_ID }}.${{ steps.v.outputs.version }}.nupkg
+          merm=artifacts/${{ env.MERMAID_ID }}.${{ steps.v.outputs.version }}.nupkg
+          for p in "$core" "$merm"; do
+            [ -f "$p" ] || { echo "::error::$p not produced"; exit 1; }
+          done
+
+          # The assembly must NOT take the package's name. Consumers spell it in
+          # avares://LiveMarkdown.Avalonia/... URIs and assembly=LiveMarkdown.Avalonia xmlns
+          # declarations, and sharing upstream's identity is what lets the conflict resolver pair
+          # them at all. This is the one fork here that does not get renamed.
+          mkdir -p _c && (cd _c && unzip -qo "../$core")
+          ls _c/lib/*/LiveMarkdown.Avalonia.dll >/dev/null \
+            || { echo "::error::core assembly is not LiveMarkdown.Avalonia.dll"; exit 1; }
+
+          mkdir -p _m && (cd _m && unzip -qo "../$merm")
+          ls _m/lib/*/LiveMarkdown.Avalonia.Mermaid.dll >/dev/null \
+            || { echo "::error::mermaid assembly is not LiveMarkdown.Avalonia.Mermaid.dll"; exit 1; }
+
+          echo "mermaid dependencies:"; grep -oE '<dependency id="[^"]*" version="[^"]*"' _m/*.nuspec | sed 's/^/  /'
+          grep -q "<dependency id=\"${{ env.CORE_ID }}\"" _m/*.nuspec \
+            || { echo "::error::Mermaid does not depend on ${{ env.CORE_ID }} — the id substitution did not apply"; exit 1; }
+          if grep -q '<dependency id="LiveMarkdown.Avalonia"' _m/*.nuspec; then
+            echo "::error::Mermaid depends on UPSTREAM's core; both cores in one graph and MSBuild silently picks one"; exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: livemarkdown-${{ steps.v.outputs.version }}
+          path: artifacts/*.nupkg
+          if-no-files-found: error
+
+      # Core first: Mermaid depends on it, and a feed briefly holding a package whose dependency does
+      # not resolve is worse than one that is briefly incomplete.
+      - name: Push to Cloudsmith
+        if: startsWith(github.ref_name, 'release/')
+        run: |
+          for id in ${{ env.CORE_ID }} ${{ env.MERMAID_ID }}; do
+            dotnet nuget push "artifacts/$id.${{ steps.v.outputs.version }}.nupkg" \
+              --source "${{ env.FEED }}" \
+              --api-key "${{ secrets.NUGET_API_KEY }}" \
+              --skip-duplicate
+          done
