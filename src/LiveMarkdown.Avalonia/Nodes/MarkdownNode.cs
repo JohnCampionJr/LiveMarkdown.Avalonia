@@ -32,10 +32,6 @@ public abstract class MarkdownNode
         new MarkdownNodeFactory<LinkInlineNode>(),
         new MarkdownNodeFactory<LiteralInlineNode>(),
         new MarkdownNodeFactory<TaskListNode>(),
-        // Fork: $…$ / $$…$$ are parsed (UseAdvancedExtensions turns Markdig's math extension on) but
-        // upstream renders neither — inline math fell through to an empty Run and disappeared. See MathInlineNode.
-        new MarkdownNodeFactory<MathInlineNode>(),
-        new MarkdownNodeFactory<MathBlockNode>(),
         new MarkdownNodeFactory<AlertBlockNode>(),
         new MarkdownNodeFactory<CodeBlockNode>(),
         new MarkdownNodeFactory<HeadingBlockNode>(),
@@ -45,9 +41,7 @@ public abstract class MarkdownNode
         new MarkdownNodeFactory<QuoteBlockNode>(),
         new MarkdownNodeFactory<TableCellNode>(),
         new MarkdownNodeFactory<TableNode>(),
-        new MarkdownNodeFactory<ThematicBreakBlockNode>(),
-        // Fork extension: ::: widget <key> ::: hosts an app-resolved control inline (MarkdownRenderer.WidgetResolver).
-        new MarkdownNodeFactory<WidgetBlockNode>()
+        new MarkdownNodeFactory<ThematicBreakBlockNode>()
     );
 
     /// <summary>
