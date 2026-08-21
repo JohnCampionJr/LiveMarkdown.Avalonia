@@ -241,7 +241,7 @@ public partial class MarkdownRenderer
         }
 
         TrackSelectionPointer(e);
-        UpdateSelectionRangeFromPoint(e.GetPosition(this));
+        UpdateSelectionRangeFromPoint(point.Position);
 
         e.Handled = true;
 
@@ -996,13 +996,10 @@ public partial class MarkdownRenderer
     internal static IEnumerable<MarkdownTextBlock> GetAllSelectableBlocksInScope(Visual scopeRoot)
     {
         // We want all blocks, including nested ones, because hierarchy is handled by
-        // GetEffectiveStart/GetEffectiveEnd. DFS order provides the document order.
-        if (scopeRoot is MarkdownRenderer renderer)
-        {
-            return renderer.GetSelectableBlocksInRenderer();
-        }
-
-        return scopeRoot.GetSelfAndVisualDescendants().OfType<MarkdownTextBlock>();
+        // GetEffectiveStart/GetEffectiveEnd. DFS order provides the document order. Skip blocks inside a
+        // collapsed branch (e.g. an inline widget's hidden alternate view) so select-all/copy never picks up
+        // text the user can't see.
+        return scopeRoot.GetSelfAndVisualDescendants().OfType<MarkdownTextBlock>().Where(b => b.IsEffectivelyVisible);
     }
 
     private static bool IsNestedBlock(MarkdownTextBlock child) => child.FindAncestorOfType<MarkdownTextBlock>() is not null;

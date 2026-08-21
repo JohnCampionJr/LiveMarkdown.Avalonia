@@ -35,6 +35,8 @@ public class TableNode : BlockNode<Table>
                 Child = container
             }
         };
+        // TWEED FORK: a vertical wheel over the table keeps scrolling the transcript (see WheelAxisRouting).
+        WheelAxisRouting.Attach((ScrollViewer)Control);
     }
 
     /// <inheritdoc/>
