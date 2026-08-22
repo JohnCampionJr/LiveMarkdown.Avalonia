@@ -27,7 +27,7 @@ permissions:
 env:
   CORE_ID: Avalloy.LiveMarkdown
   MERMAID_ID: Avalloy.LiveMarkdown.Mermaid
-  FEED: https://nuget.cloudsmith.io/jcamp/packages/v3/index.json
+  FEED: https://f.feedz.io/jcamp/packages/nuget/index.json
 
 jobs:
   publish:
@@ -128,7 +128,7 @@ jobs:
 
       # Core first: Mermaid depends on it, and a feed briefly holding a package whose dependency does
       # not resolve is worse than one that is briefly incomplete.
-      - name: Push to Cloudsmith
+      - name: Push to the feed
         if: startsWith(github.ref_name, 'release/')
         run: |
           for id in ${{ env.CORE_ID }} ${{ env.MERMAID_ID }}; do
