@@ -996,10 +996,16 @@ public partial class MarkdownRenderer
     internal static IEnumerable<MarkdownTextBlock> GetAllSelectableBlocksInScope(Visual scopeRoot)
     {
         // We want all blocks, including nested ones, because hierarchy is handled by
-        // GetEffectiveStart/GetEffectiveEnd. DFS order provides the document order. Skip blocks inside a
-        // collapsed branch (e.g. an inline widget's hidden alternate view) so select-all/copy never picks up
-        // text the user can't see.
-        return scopeRoot.GetSelfAndVisualDescendants().OfType<MarkdownTextBlock>().Where(b => b.IsEffectivelyVisible);
+        // GetEffectiveStart/GetEffectiveEnd. DFS order provides the document order.
+        var blocks = scopeRoot is MarkdownRenderer renderer
+            ? renderer.GetSelectableBlocksInRenderer()
+            : scopeRoot.GetSelfAndVisualDescendants().OfType<MarkdownTextBlock>();
+
+        // FORK: skip blocks inside a collapsed branch (e.g. an inline widget's hidden alternate view) so
+        // select-all/copy never picks up text the user can't see. Filtered HERE rather than inside the cache
+        // above, because visibility changes without a document change — an expander collapsing does not
+        // invalidate the block cache, so a filter baked into it would be stale.
+        return blocks.Where(b => b.IsEffectivelyVisible);
     }
 
     private static bool IsNestedBlock(MarkdownTextBlock child) => child.FindAncestorOfType<MarkdownTextBlock>() is not null;
