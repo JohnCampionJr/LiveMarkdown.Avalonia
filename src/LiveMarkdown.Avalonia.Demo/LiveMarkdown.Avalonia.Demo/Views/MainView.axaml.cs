@@ -21,9 +21,6 @@ public partial class MainView : UserControl
         InitializeComponent();
 
         MarkdownRenderer.ImageBasePath = Path.Combine(AppContext.BaseDirectory, "samples");
-
-        // PROTOTYPE: one handler at the document scroller, no library involvement — see DocumentWheelRouting.
-        DocumentWheelRouting.Attach(MarkdownRendererScrollViewer);
         MarkdownTextBlock.SetHighlightStyles(RootPanel, CreateSearchHighlightStyles());
 
         MarkdownRenderer.LayoutUpdated += HandleMarkdownRendererLayoutUpdated;

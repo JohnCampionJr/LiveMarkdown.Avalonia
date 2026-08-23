@@ -3,8 +3,19 @@
   xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
   xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:md="clr-namespace:LiveMarkdown.Avalonia;assembly=LiveMarkdown.Avalonia"
   xmlns:shadui="clr-namespace:ShadUI.Controls;assembly=ShadUI" xmlns:vm="clr-namespace:LiveMarkdown.Avalonia.Demo.ViewModels"
+  xmlns:views="clr-namespace:LiveMarkdown.Avalonia.Demo.Views"
+  xmlns:mermaid="clr-namespace:LiveMarkdown.Avalonia;assembly=LiveMarkdown.Avalonia.Mermaid"
   d:DesignHeight="600" d:DesignWidth="1000"
   x:DataType="vm:MainViewModel" mc:Ignorable="d">
+
+  <UserControl.Styles>
+    <!--  A document-wide router owns every wheel gesture, so anything that legitimately wants its own has
+          to say so. A Mermaid diagram is the case: PanAndZoom uses the wheel to ZOOM, and without this the
+          router would scroll the page out from under it.  -->
+    <Style Selector="mermaid|PanAndZoom">
+      <Setter Property="views:DocumentWheelRouting.Exempt" Value="Both"/>
+    </Style>
+  </UserControl.Styles>
 
   <Design.DataContext>
     <vm:MainViewModel/>
@@ -111,8 +122,11 @@
         </ScrollViewer>
 
         <!--  Markdown Renderer  -->
+        <!--  Dominant-axis wheel routing for the whole document. One handler, declared and owned by the
+              app: nothing in LiveMarkdown is involved. See DocumentWheelRouting.  -->
         <ScrollViewer
           x:Name="MarkdownRendererScrollViewer" Grid.Row="0"
+          views:DocumentWheelRouting.Enabled="True"
           Grid.Column="2"
           Background="{DynamicResource CardBackgroundColor}"
           BorderBrush="{DynamicResource BorderColor}"
