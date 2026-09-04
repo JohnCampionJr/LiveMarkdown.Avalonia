@@ -37,4 +37,24 @@
     <None Include="..\..\README.md" Pack="true" PackagePath="\"/>
     <None Include="..\..\img\icon.png" Pack="true" PackagePath="icon.png"/>
   </ItemGroup>
+
+  <!-- A downstream that republishes this fork under its own package ids supplies these three
+       properties at pack time. All are EMPTY by default, so a plain clone builds and packs exactly as
+       upstream does and nothing here presumes a downstream exists.
+
+       The ids have to live in the projects rather than on the pack command line because Mermaid
+       references the core by ProjectReference: a global -p:PackageId would rename both projects to
+       the same id, and the package would declare a dependency on itself. Distinct property names per
+       project is what makes the reference resolve to the right one.
+
+       ForkAssemblyVersion exists because this fork ships ALONGSIDE the upstream companion packages of
+       anyone who mixes them. Two assemblies with the same simple name only pass MSBuild's conflict
+       resolver when their versions are identical, so a downstream pins this to the upstream tag it
+       merged. -->
+  <PropertyGroup>
+    <PackageId Condition="'$(ForkMermaidPackageId)' != ''">$(ForkMermaidPackageId)</PackageId>
+    <AssemblyVersion Condition="'$(ForkAssemblyVersion)' != ''">$(ForkAssemblyVersion)</AssemblyVersion>
+    <FileVersion Condition="'$(ForkAssemblyVersion)' != ''">$(ForkAssemblyVersion)</FileVersion>
+  </PropertyGroup>
+
 </Project>
