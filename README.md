@@ -1,3 +1,28 @@
+> ### This branch: a host-side answer to wheel routing
+>
+> **`demo/host-side-wheel-routing` is a reference branch, not a proposed change.** Nothing here is
+> offered for merge, and the library is untouched — the only additions are in the demo app.
+>
+> **What it shows.** A vertical wheel over a table, a code block or a Mermaid diagram scrolls the
+> *document*, not whichever nested `ScrollViewer` happens to sit under the pointer. A gesture's axis,
+> owner and pan target are decided at its first event and hold until it ends, so a scroll already in
+> flight never changes hands mid-motion. Controls that legitimately want the wheel — a Mermaid
+> `PanAndZoom`, which uses it to zoom — opt out per axis through an attached property.
+>
+> **Why it exists.** [PR #33](https://github.com/DearVa/LiveMarkdown.Avalonia/pull/33) proposed this
+> inside the library and was closed: it belongs in the host. This branch is that argument taken
+> seriously — the whole mechanism lives in `DocumentWheelRouting.cs` in the demo project, wired up
+> declaratively in `MainView.axaml`, with no LiveMarkdown involvement at all. It is here so anyone
+> hitting the same problem has something concrete to read or borrow.
+>
+> **Status.** Rebased on upstream `main`. Carries one fix made after the original branch: the nearest
+> router wins, so nested documents cannot swallow each other's wheel events. Production-tested in a
+> real app on transcripts of several thousand rows.
+>
+> Everything below this line is upstream's README, unchanged.
+
+---
+
 <div align="center">
 
 <img src="https://raw.githubusercontent.com/DearVa/LiveMarkdown.Avalonia/main/img/icon-large.png" alt="LiveMarkdown.Avalonia Logo" width="128" height="128" />

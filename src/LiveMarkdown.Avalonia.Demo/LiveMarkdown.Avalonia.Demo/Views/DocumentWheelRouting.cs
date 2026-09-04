@@ -184,6 +184,13 @@ public static class DocumentWheelRouting
     {
         if (sender is not ScrollViewer document) return;
 
+        // Nearest router wins. Tunnelling outer-to-inner, an outer router would otherwise swallow every
+        // vertical wheel aimed at an inner region and that region could never scroll.
+        for (var v = e.Source as Visual; v is not null && v != document; v = v.GetVisualParent())
+        {
+            if (v is ScrollViewer nearer && GetEnabled(nearer)) return;
+        }
+
         // Explicit horizontal intent belongs to whatever is under the pointer.
         if (e.KeyModifiers.HasFlag(KeyModifiers.Shift)) return;
         if (e.Delta is { X: 0, Y: 0 }) return;
