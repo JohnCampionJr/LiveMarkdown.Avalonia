@@ -203,7 +203,7 @@ public partial class MarkdownRenderer : Control
     private void ClearSelectionOnPress(object? sender, PointerPressedEventArgs e)
     {
         if (!e.GetCurrentPoint(this).Properties.IsLeftButtonPressed) return;
-        if (string.IsNullOrEmpty(SelectedText)) return;
+        if (!HasSelection()) return;
         ClearSelection(GetVisibleMarkdownTextBlockDescendants(GetSelectionScopeRoot()));
         UpdateCanCopy();
     }
@@ -244,13 +244,21 @@ public partial class MarkdownRenderer : Control
         }
 
         RenderedTextProjection = null;
-        ClearAppliedTextSearch();
         if (value is not null)
         {
+            // The search is NOT torn down here. Removing a named highlight that carries a foreground
+            // rebuilds that block's text layout, so clearing every matched block and re-applying it
+            // after the layout invalidated each of them twice per document update -- on a document
+            // streaming in, that was most of what a keystroke cost. ApplyTextSearchCore already
+            // diffs: it drops the highlight from blocks that no longer match and leaves a block whose
+            // ranges are unchanged alone. It runs from LayoutUpdated, which is raised before the
+            // frame is drawn, so nothing stale is ever painted.
             ScheduleRenderedTextStateRefresh(value.Version);
         }
         else
         {
+            // Nothing will be laid out to re-apply against, so what is painted now has to go.
+            ClearAppliedTextSearch();
             _pendingRenderedTextStateVersion = null;
         }
 

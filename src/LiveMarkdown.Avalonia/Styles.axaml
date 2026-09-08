@@ -96,10 +96,14 @@
                 x:Name="PART_ScrollViewer"
                 HorizontalScrollBarVisibility="{TemplateBinding HorizontalScrollBarVisibility}"
                 VerticalScrollBarVisibility="Auto">
-                <md:MarkdownTextBlock
-                  x:Name="PART_CodeTextBlock" Margin="4"
-                  FontFamily="{TemplateBinding FontFamily}"
-                  TextWrapping="{TemplateBinding TextWrapping}"/>
+                <!--
+                  One text block per group of lines, filled by the control. A block lays out as one
+                  unit, so a single block would re-measure every line of the code each time one is
+                  appended; see CodeBlock.LinesPerChunk.
+                -->
+                <StackPanel
+                  x:Name="PART_CodeLines" Margin="4"
+                  Orientation="Vertical" Spacing="0"/>
               </ScrollViewer>
             </Border>
           </StackPanel>

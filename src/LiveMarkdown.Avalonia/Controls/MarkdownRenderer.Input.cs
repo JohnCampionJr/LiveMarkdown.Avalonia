@@ -53,7 +53,7 @@ public partial class MarkdownRenderer
     {
         get
         {
-            var allBlocks = GetVisibleMarkdownTextBlockDescendants(GetSelectionScopeRoot());
+            var allBlocks = ScopeBlocksInReadingOrder(GetSelectionScopeRoot());
 
             var sb = new StringBuilder();
             var isFirst = true;
@@ -102,6 +102,9 @@ public partial class MarkdownRenderer
     // Built on PointerPressed, cleared when the interaction ends.
     private MarkdownTextBlock[]? _activeScopeBlocks;
 
+    /// <summary>Where each block of <see cref="_activeScopeBlocks"/> sits in reading order.</summary>
+    private Dictionary<MarkdownTextBlock, int>? _activeScopeOrder;
+
     private DispatcherTimer? _selectionAutoScrollTimer;
     private Point? _lastSelectionPointerPosition;
     private Point? _lastSelectionPointerTopLevelPosition;
@@ -148,7 +151,12 @@ public partial class MarkdownRenderer
         {
             ClearContextMenuCandidate();
 
-            _activeScopeBlocks = [.. GetVisibleMarkdownTextBlockDescendants(ResolveSelectionScopeRoot(targetBlock, this))];
+            _activeScopeBlocks = ScopeBlocksInReadingOrder(ResolveSelectionScopeRoot(targetBlock, this));
+            _activeScopeOrder = new Dictionary<MarkdownTextBlock, int>(_activeScopeBlocks.Length);
+            for (var index = 0; index < _activeScopeBlocks.Length; index++)
+            {
+                _activeScopeOrder[_activeScopeBlocks[index]] = index;
+            }
             _interactionPointer = e.Pointer;
             _interactionStartPoint = point.Position;
             _pendingLinkBlock = targetBlock;
@@ -457,6 +465,7 @@ public partial class MarkdownRenderer
         _pendingLink = null;
         _pendingLinkPosition = 0;
         _activeScopeBlocks = null;
+        _activeScopeOrder = null;
         _selectionAnchor = null;
         _lastSelectionPointerPosition = null;
         _lastSelectionPointerTopLevelPosition = null;
@@ -880,15 +889,25 @@ public partial class MarkdownRenderer
             return offsetB <= placeholderInB ? 1 : -1;
         }
 
-        // Fallback to list index
-        var idxA = Array.IndexOf(_activeScopeBlocks!, blockA);
-        var idxB = Array.IndexOf(_activeScopeBlocks!, blockB);
+        // Fallback to reading-order index. Through a map rather than a scan of the array: this runs
+        // for every block in the scope on every pointer move, so scanning made a drag quadratic in
+        // the size of the document.
+        var order = _activeScopeOrder;
+        if (order is null) return 0;
+
+        var idxA = order.TryGetValue(blockA, out var a) ? a : -1;
+        var idxB = order.TryGetValue(blockB, out var b) ? b : -1;
         return idxA.CompareTo(idxB);
     }
 
     private static int GetPlaceholderIndex(MarkdownTextBlock parent, MarkdownTextBlock child)
     {
         if (parent.Inlines == null) return -1;
+
+        // Walking the inlines to look for a child that is not underneath this block at all is by far
+        // the usual case -- two blocks taken from the scope are almost never nested -- and it costs
+        // the whole inline tree to answer no. The visual parent chain answers it in a few steps.
+        if (!IsVisualAncestor(parent, child)) return -1;
 
         var currentOffset = 0;
         if (parent.Inlines.Any(ProcessInlineOffset))
@@ -993,6 +1012,50 @@ public partial class MarkdownRenderer
     }
 
     private static bool IsNestedBlock(MarkdownTextBlock child) => child.FindAncestorOfType<MarkdownTextBlock>() is not null;
+
+    /// <summary>
+    /// The scope's visible blocks in READING order. Inside one renderer that is tree order, which the
+    /// enumeration already gives. Across renderers — a scope declared on a root they share — it is the order
+    /// the renderers are laid out in, top to bottom then left to right, which need not be the order they were
+    /// added: a virtualizing host appends new containers and reuses pooled ones in place, so its children sit
+    /// in no particular order. The range between two blocks is their distance in this list, and the copied
+    /// text is this list's concatenation, so the list has to read the way the screen does.
+    /// </summary>
+    private MarkdownTextBlock[] ScopeBlocksInReadingOrder(Visual scopeRoot)
+    {
+        MarkdownTextBlock[] blocks = [.. GetVisibleMarkdownTextBlockDescendants(scopeRoot)];
+        if (ReferenceEquals(scopeRoot, this) || blocks.Length < 2) return blocks;
+
+        // Keyed by the OUTERMOST renderer below the root, so a renderer nested in a row rides with its row;
+        // ties (same renderer) fall back to tree order, keeping the sort stable within a renderer.
+        var keyed = new (MarkdownTextBlock Block, Point Origin, int Order)[blocks.Length];
+        for (var i = 0; i < blocks.Length; i++)
+        {
+            keyed[i] = (blocks[i], OwningRendererOrigin(blocks[i], scopeRoot), i);
+        }
+
+        Array.Sort(keyed, static (a, b) =>
+        {
+            var byY = a.Origin.Y.CompareTo(b.Origin.Y);
+            if (byY != 0) return byY;
+            var byX = a.Origin.X.CompareTo(b.Origin.X);
+            return byX != 0 ? byX : a.Order.CompareTo(b.Order);
+        });
+
+        for (var i = 0; i < keyed.Length; i++) blocks[i] = keyed[i].Block;
+        return blocks;
+    }
+
+    private static Point OwningRendererOrigin(MarkdownTextBlock block, Visual root)
+    {
+        Visual owner = block;
+        for (var v = block.GetVisualParent(); v is not null && !ReferenceEquals(v, root); v = v.GetVisualParent())
+        {
+            if (v is MarkdownRenderer) owner = v;
+        }
+
+        return owner.TranslatePoint(default, root) ?? default;
+    }
 
     private static int GetCaretPosition(MarkdownTextBlock block, PointerEventArgs e)
     {
@@ -1118,6 +1181,24 @@ public partial class MarkdownRenderer
             return;
         }
 
-        CanCopy = !string.IsNullOrEmpty(SelectedText);
+        CanCopy = HasSelection();
+    }
+
+    /// <summary>
+    /// Whether anything in the scope is selected.
+    /// </summary>
+    /// <remarks>
+    /// Reading <see cref="SelectedText"/> to answer this builds the selected text of every block in
+    /// the scope and joins it, only to ask whether the result was empty -- on a large selection that
+    /// is the whole document assembled into a string, on a pointer press.
+    /// </remarks>
+    internal bool HasSelection()
+    {
+        foreach (var block in GetVisibleMarkdownTextBlockDescendants(GetSelectionScopeRoot()))
+        {
+            if (block.SelectionStart != block.SelectionEnd) return true;
+        }
+
+        return false;
     }
 }

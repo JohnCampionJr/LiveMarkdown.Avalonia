@@ -104,6 +104,72 @@ public class SyntaxHighlightingTests
         }
     }
 
+    // ---------------------------------------------------------------- run merging
+
+    [Test]
+    public void AdjacentRunsOfALineNeverShareTheSameStyle()
+    {
+        // The invariant behind emitting one Run per styled group rather than one per token: if two
+        // neighbours agree on everything the theme sets, the boundary between them is invisible and
+        // the second run is a shaped run bought for nothing on every measure of the block.
+        var codeBlock = new CodeBlock
+        {
+            Language = "csharp",
+            Code = "public static int Add(int first, int second) => first + second;",
+        };
+
+        foreach (var line in codeBlock.Inlines.OfType<Span>())
+        {
+            var runs = line.Inlines.OfType<Run>().ToList();
+            Assert.That(runs, Has.Count.GreaterThan(1), "sanity: this line has more than one style");
+
+            for (var i = 1; i < runs.Count; i++)
+            {
+                var previous = runs[i - 1];
+                var current = runs[i];
+                var same =
+                    Equals((previous.Foreground as ISolidColorBrush)?.Color, (current.Foreground as ISolidColorBrush)?.Color) &&
+                    Equals((previous.Background as ISolidColorBrush)?.Color, (current.Background as ISolidColorBrush)?.Color) &&
+                    previous.FontStyle == current.FontStyle &&
+                    previous.FontWeight == current.FontWeight;
+
+                Assert.That(
+                    same,
+                    Is.False,
+                    $"runs '{previous.Text}' and '{current.Text}' look identical and should have been one run");
+            }
+        }
+    }
+
+    [Test]
+    public void MergingRunsKeepsTheLineTextExactly()
+    {
+        const string code = "public static int Add(int first, int second) => first + second;";
+        var codeBlock = new CodeBlock { Language = "csharp", Code = code };
+
+        var rendered = string.Concat(EnumerateRuns(codeBlock.Inlines).Select(run => run.Text));
+
+        Assert.That(rendered, Is.EqualTo(code), "nothing dropped, duplicated or reordered by merging");
+    }
+
+    [Test]
+    public void AMultiLineBlockKeepsOneInlinePerLine()
+    {
+        // Merging happens WITHIN a line. It must never reach across the line break, which is a
+        // separate inline and the thing that puts the next line on its own row.
+        var codeBlock = new CodeBlock
+        {
+            Language = "csharp",
+            Code = "var first = 1;\nvar second = 2;\nvar third = 3;",
+        };
+
+        var lines = codeBlock.Inlines.Count(inline => inline is Run or Span);
+        var breaks = codeBlock.Inlines.Count(inline => inline is LineBreak);
+
+        Assert.That(lines, Is.EqualTo(3));
+        Assert.That(breaks, Is.EqualTo(2));
+    }
+
     private static CodeBlock CreateCodeBlock(string? customThemeName)
     {
         var codeBlock = new CodeBlock

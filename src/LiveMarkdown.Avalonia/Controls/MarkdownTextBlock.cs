@@ -1,4 +1,5 @@
-﻿using System.Diagnostics.CodeAnalysis;
+﻿using System.Buffers;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -130,6 +131,12 @@ public partial class MarkdownTextBlock : SelectableTextBlock
     private TextLayout? _lineGeometryLayout;
     private TextLineGeometry[] _lineGeometry = [];
     private string? _layoutText;
+
+    /// <summary>
+    /// Shaped chips, kept for the life of the block and keyed on everything their shape depends on.
+    /// Dropped when the typography changes, which is the one thing that invalidates all of them.
+    /// </summary>
+    private readonly Dictionary<CodeInlineShapeKey, ShapedCodeInline?> codeInlineShapes = [];
 
     /// <summary>
     /// Initializes a new instance of the <see cref="MarkdownTextBlock"/> class.
@@ -305,6 +312,7 @@ public partial class MarkdownTextBlock : SelectableTextBlock
         _registeredHighlightPaintSnapshot = HighlightPaintSnapshot.Empty;
         _lineGeometryLayout = null;
         _lineGeometry = [];
+        codeInlineShapes.Clear();
         linksByTag.Clear();
         pointerLink = null;
         pressingLink = null;
@@ -357,6 +365,9 @@ public partial class MarkdownTextBlock : SelectableTextBlock
         {
             _paintSnapshotDirty = true;
             _lineGeometryLayout = null;
+
+            // Everything here changes how a chip shapes, so nothing already shaped is reusable.
+            codeInlineShapes.Clear();
         }
 
         if (change.Property != HighlightStylesProperty)
@@ -843,7 +854,7 @@ public partial class MarkdownTextBlock : SelectableTextBlock
 
         _paintSnapshot = textRuns is null ?
             TextPaintSnapshot.Empty :
-            TextPaintSnapshot.Create(textRuns, GetCodeInlineSpans(), FlowDirection, LetterSpacing);
+            TextPaintSnapshot.Create(textRuns, GetCodeInlineSpans(), FlowDirection, LetterSpacing, codeInlineShapes);
         _paintSnapshotTextRuns = textRuns;
         _paintSnapshotDirty = false;
         return _paintSnapshot;
@@ -1242,7 +1253,8 @@ public partial class MarkdownTextBlock : SelectableTextBlock
             IReadOnlyList<TextRun> textRuns,
             IReadOnlyList<CodeInlineSpan> codeInlineSpans,
             FlowDirection flowDirection,
-            double letterSpacing)
+            double letterSpacing,
+            Dictionary<CodeInlineShapeKey, ShapedCodeInline?> shapeCache)
         {
             List<TextPaintSpan>? backgroundSpans = null;
             List<CodeInlineLayout>? codeInlineLayouts = null;
@@ -1384,6 +1396,7 @@ public partial class MarkdownTextBlock : SelectableTextBlock
                         letterSpacing,
                         leftSpacing,
                         rightSpacing,
+                        shapeCache,
                         out var layout))
                 {
                     (codeInlineLayouts ??= []).Add(layout);
@@ -1503,13 +1516,23 @@ public partial class MarkdownTextBlock : SelectableTextBlock
         private readonly string text;
         private readonly ShapedCodeInlineRun[] runs;
 
-        private CodeInlineLayout(int start, string text, ShapedCodeInlineRun[] runs)
+        private CodeInlineLayout(int start, ShapedCodeInline shaped)
         {
             Start = start;
-            this.text = text;
-            this.runs = runs;
+            text = shaped.Text;
+            runs = shaped.Runs;
         }
 
+        /// <summary>
+        /// The layout for one chip, shaping it only if this text has not been shaped before.
+        /// </summary>
+        /// <remarks>
+        /// Shaping a chip builds a whole nested TextLayout, and Avalonia rebuilds a block's text runs
+        /// on every measure -- so a paragraph of chips re-shaped every one of them each time anything
+        /// in the block changed, though their text and typography had not. What changes between
+        /// measures is only WHERE a chip sits, which is the one thing the shaped form does not
+        /// contain: positions inside it are local, and Start is applied on the way out.
+        /// </remarks>
         public static bool TryCreate(
             int start,
             string text,
@@ -1518,7 +1541,47 @@ public partial class MarkdownTextBlock : SelectableTextBlock
             double letterSpacing,
             double leftSpacing,
             double rightSpacing,
+            Dictionary<CodeInlineShapeKey, ShapedCodeInline?> cache,
             [NotNullWhen(true)] out CodeInlineLayout? layout)
+        {
+            var key = new CodeInlineShapeKey(
+                text,
+                properties.Typeface,
+                properties.FontRenderingEmSize,
+                properties.TextDecorations,
+                properties.FontFeatures,
+                properties.CultureInfo,
+                properties.ForegroundBrush,
+                flowDirection,
+                letterSpacing,
+                leftSpacing,
+                rightSpacing);
+
+            if (!cache.TryGetValue(key, out var shaped))
+            {
+                // A chip that cannot be pre-shaped is remembered as such, so the attempt is not
+                // repeated for it on every measure either.
+                shaped = TryShape(text, properties, flowDirection, letterSpacing, leftSpacing, rightSpacing);
+                cache[key] = shaped;
+            }
+
+            if (shaped is null)
+            {
+                layout = null;
+                return false;
+            }
+
+            layout = new CodeInlineLayout(start, shaped);
+            return true;
+        }
+
+        private static ShapedCodeInline? TryShape(
+            string text,
+            TextRunProperties properties,
+            FlowDirection flowDirection,
+            double letterSpacing,
+            double leftSpacing,
+            double rightSpacing)
         {
             // Avalonia's bidi resolver stores one level per Unicode code point, while
             // CoalesceLevels advances a DrawableTextRun by its UTF-16 Length. A pre-shaped
@@ -1527,8 +1590,7 @@ public partial class MarkdownTextBlock : SelectableTextBlock
             // path until Avalonia uses a consistent unit for drawable runs.
             if (HasCodePointLengthMismatch(text))
             {
-                layout = null;
-                return false;
+                return null;
             }
 
             var source = new CodeInlineTextSource(text, properties);
@@ -1585,8 +1647,7 @@ public partial class MarkdownTextBlock : SelectableTextBlock
                         var runEnd = runStart + runLength;
                         if (runStart < 0 || runEnd > text.Length)
                         {
-                            layout = null!;
-                            return false;
+                            return null;
                         }
 
                         var glyphs = new GlyphInfo[shapedRun.ShapedBuffer.Length];
@@ -1622,8 +1683,7 @@ public partial class MarkdownTextBlock : SelectableTextBlock
 
             if (shapedRuns is null)
             {
-                layout = null;
-                return false;
+                return null;
             }
 
             var builtRuns = shapedRuns
@@ -1634,8 +1694,7 @@ public partial class MarkdownTextBlock : SelectableTextBlock
             {
                 if (run.Start != expectedStart)
                 {
-                    layout = null!;
-                    return false;
+                    return null;
                 }
 
                 expectedStart = run.End;
@@ -1643,13 +1702,11 @@ public partial class MarkdownTextBlock : SelectableTextBlock
 
             if (expectedStart != text.Length || leftmostRun is null || rightmostRun is null)
             {
-                layout = null!;
-                return false;
+                return null;
             }
 
             AddEdgeSpacing(leftmostRun, rightmostRun, leftSpacing, rightSpacing);
-            layout = new CodeInlineLayout(start, text, builtRuns);
-            return true;
+            return new ShapedCodeInline(text, builtRuns);
         }
 
         private static bool HasCodePointLengthMismatch(ReadOnlySpan<char> text)
@@ -1717,6 +1774,26 @@ public partial class MarkdownTextBlock : SelectableTextBlock
             }
         }
     }
+
+    /// <summary>One chip's shaped glyphs, independent of where the chip sits in the block's text.</summary>
+    private sealed record ShapedCodeInline(string Text, ShapedCodeInlineRun[] Runs);
+
+    /// <summary>
+    /// Everything a chip's shaped form depends on. Position is deliberately NOT part of it: that is
+    /// what changes as a block grows, and what the shaped form is reused across.
+    /// </summary>
+    private readonly record struct CodeInlineShapeKey(
+        string Text,
+        Typeface Typeface,
+        double FontRenderingEmSize,
+        TextDecorationCollection? TextDecorations,
+        IReadOnlyList<FontFeature>? FontFeatures,
+        System.Globalization.CultureInfo? CultureInfo,
+        IBrush? Foreground,
+        FlowDirection FlowDirection,
+        double LetterSpacing,
+        double LeftSpacing,
+        double RightSpacing);
 
     private sealed class ShapedCodeInlineRun
     {
@@ -1873,12 +1950,61 @@ public partial class MarkdownTextBlock : SelectableTextBlock
         }
     }
 
-    private readonly struct MarkdownInlinesTextSource(
-        IReadOnlyList<TextRun> textRuns,
-        TextPaintSnapshot paintSnapshot,
-        TextStyleSnapshot textStyles
-    ) : ITextSource
+    /// <summary>
+    /// Feeds the formatter from the runs an inline collection built.
+    /// </summary>
+    /// <remarks>
+    /// <para>The run list is INDEXED once here rather than walked per call. The formatter asks for a
+    /// run at very nearly every source index, so a scan from zero made a block quadratic in its own
+    /// run count — and a fenced code block carries two runs per line (the line, then its break), so a
+    /// 200-line block paid on the order of eighty thousand run visits per measure. Every appended line
+    /// re-measures the whole block, which is what made a streaming code block cost more per line the
+    /// longer it got.</para>
+    ///
+    /// <para>A class rather than a struct deliberately: it reaches the formatter through
+    /// <see cref="ITextSource"/> either way, so a struct was already boxed on the way in, and the
+    /// index has to be built once for the source rather than rebuilt per call.</para>
+    /// </remarks>
+    private sealed class MarkdownInlinesTextSource : ITextSource
     {
+        private readonly IReadOnlyList<TextRun> textRuns;
+        private readonly TextPaintSnapshot paintSnapshot;
+        private readonly TextStyleSnapshot textStyles;
+
+        /// <summary>
+        /// Where each non-empty run starts, ascending, with its index in <see cref="textRuns"/>.
+        /// Empty runs are left out so a lookup cannot land on one.
+        /// </summary>
+        private readonly (int Start, int RunIndex)[] runOffsets;
+
+        public MarkdownInlinesTextSource(
+            IReadOnlyList<TextRun> textRuns,
+            TextPaintSnapshot paintSnapshot,
+            TextStyleSnapshot textStyles)
+        {
+            this.textRuns = textRuns;
+            this.paintSnapshot = paintSnapshot;
+            this.textStyles = textStyles;
+
+            var count = 0;
+            for (var index = 0; index < textRuns.Count; index++)
+            {
+                if (textRuns[index].Length > 0) count++;
+            }
+
+            runOffsets = count == 0 ? [] : new (int, int)[count];
+            var position = 0;
+            var next = 0;
+            for (var index = 0; index < textRuns.Count; index++)
+            {
+                var length = textRuns[index].Length;
+                if (length <= 0) continue;
+
+                runOffsets[next++] = (position, index);
+                position += length;
+            }
+        }
+
         public TextRun GetTextRun(int textSourceIndex)
         {
             if (paintSnapshot.TryGetCodeInlineLayout(textSourceIndex, out var codeInlineLayout) &&
@@ -1887,48 +2013,72 @@ public partial class MarkdownTextBlock : SelectableTextBlock
                 return shapedCodeRun;
             }
 
-            var currentPosition = 0;
-            foreach (var textRun in textRuns)
+            var offsetIndex = FindRun(textSourceIndex);
+            if (offsetIndex < 0)
             {
-                if (textRun.Length <= 0)
-                {
-                    continue;
-                }
-
-                if (textSourceIndex >= currentPosition + textRun.Length)
-                {
-                    currentPosition += textRun.Length;
-                    continue;
-                }
-
-                if (textRun is not TextCharacters textCharacters)
-                {
-                    return textRun;
-                }
-
-                var skip = Math.Max(0, textSourceIndex - currentPosition);
-                var remaining = textCharacters.Text[skip..];
-                var lineBreakLength = GetLineBreakLength(remaining.Span);
-                if (lineBreakLength > 0)
-                {
-                    // Avalonia's LineBreak currently reaches this source as a CRLF
-                    // TextCharacters run. Returning TextEndOfLine is important: passing that
-                    // run through InlinesTextSource leaves the formatter at the same source
-                    // index and can produce repeated zero-length visual lines.
-                    return new TextEndOfLine(lineBreakLength);
-                }
-
-                var availableLength = GetLengthBeforeLineBreak(remaining.Span);
-                var textLength = availableLength;
-                var properties = textStyles.GetPropertiesAndLimit(
-                    textSourceIndex,
-                    ref textLength,
-                    textCharacters.Properties);
-                textLength = CoerceTextRunLength(remaining.Span[..availableLength], textLength);
-                return new TextCharacters(remaining[..textLength], properties);
+                return new TextEndOfParagraph();
             }
 
-            return new TextEndOfParagraph();
+            var (currentPosition, runIndex) = runOffsets[offsetIndex];
+            var textRun = textRuns[runIndex];
+            if (textRun is not TextCharacters textCharacters)
+            {
+                return textRun;
+            }
+
+            var skip = Math.Max(0, textSourceIndex - currentPosition);
+            var remaining = textCharacters.Text[skip..];
+            var lineBreakLength = GetLineBreakLength(remaining.Span);
+            if (lineBreakLength > 0)
+            {
+                // Avalonia's LineBreak currently reaches this source as a CRLF
+                // TextCharacters run. Returning TextEndOfLine is important: passing that
+                // run through InlinesTextSource leaves the formatter at the same source
+                // index and can produce repeated zero-length visual lines.
+                return new TextEndOfLine(lineBreakLength);
+            }
+
+            var availableLength = GetLengthBeforeLineBreak(remaining.Span);
+            var textLength = availableLength;
+            var properties = textStyles.GetPropertiesAndLimit(
+                textSourceIndex,
+                ref textLength,
+                textCharacters.Properties);
+            textLength = CoerceTextRunLength(remaining.Span[..availableLength], textLength);
+            return new TextCharacters(remaining[..textLength], properties);
+        }
+
+        /// <summary>
+        /// The entry in <see cref="runOffsets"/> holding <paramref name="textSourceIndex"/>, or -1
+        /// when the index is past the last run.
+        /// </summary>
+        /// <remarks>
+        /// An index BEFORE the first run reads as the first run, which is what a scan from zero did:
+        /// it compared only against each run's end, so a negative index matched the first one.
+        /// </remarks>
+        private int FindRun(int textSourceIndex)
+        {
+            if (runOffsets.Length == 0) return -1;
+
+            var low = 0;
+            var high = runOffsets.Length - 1;
+            var result = 0;
+            while (low <= high)
+            {
+                var middle = low + ((high - low) >> 1);
+                if (runOffsets[middle].Start <= textSourceIndex)
+                {
+                    result = middle;
+                    low = middle + 1;
+                }
+                else
+                {
+                    high = middle - 1;
+                }
+            }
+
+            var (start, runIndex) = runOffsets[result];
+            return textSourceIndex < start + textRuns[runIndex].Length ? result : -1;
         }
     }
 
@@ -1978,17 +2128,15 @@ public partial class MarkdownTextBlock : SelectableTextBlock
         return text[0] is '\n' or '\u2028' or '\u2029' ? 1 : 0;
     }
 
+    /// <summary>The characters <see cref="GetLineBreakLength"/> recognizes, for a vectorized scan.</summary>
+    private static readonly SearchValues<char> LineBreakCharacters = SearchValues.Create("\r\n\u2028\u2029");
+
     private static int GetLengthBeforeLineBreak(ReadOnlySpan<char> text)
     {
-        for (var index = 0; index < text.Length; index++)
-        {
-            if (GetLineBreakLength(text[index..]) > 0)
-            {
-                return index;
-            }
-        }
-
-        return text.Length;
+        // Was a per-character loop that re-sliced the span and called GetLineBreakLength on each
+        // position; this runs for every run the formatter asks for, on every measure.
+        var index = text.IndexOfAny(LineBreakCharacters);
+        return index < 0 ? text.Length : index;
     }
 
     /// <inheritdoc/>

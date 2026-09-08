@@ -313,27 +313,53 @@ public class MermaidPresenterTests
         });
     }
 
+    private const string ClassDefFlowchart = """
+                                             flowchart LR
+                                                 A:::accent --> B
+                                                 classDef accent fill:#e8f3ff,stroke:#2f80ed,color:#123;
+                                             """;
+
     [Test]
-    public void RenderOptions_StrictModeRejectsClassDefBeforeLayout()
+    public void RenderOptions_StrictStylingStripsClassDefAndStillRenders()
     {
-        var provider = new CountingLayoutProvider(Mermaider.MermaidRenderer.LayoutProvider);
+        var stripped = new List<StrictStylingViolation>();
         var presenter = new MermaidPresenter
         {
-            Text = """
-                   flowchart LR
-                       A:::accent --> B
-                       classDef accent fill:#e8f3ff,stroke:#2f80ed,color:#123;
-                   """,
+            Text = ClassDefFlowchart,
             RenderOptions = new MermaidRenderOptions
             {
-                LayoutProvider = provider,
-                Strict = new StrictModeOptions()
+                Strict = new StrictStylingOptions { OnStripped = v => stripped.AddRange(v) }
             }
         };
 
         Assert.DoesNotThrow(() => presenter.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity)));
-        Assert.That(provider.FlowchartCalls, Is.EqualTo(0));
-        Assert.That(presenter.DesiredSize.Width, Is.GreaterThan(0));
+        Assert.Multiple(() =>
+        {
+            Assert.That(presenter.DesiredSize.Width, Is.GreaterThan(0));
+            Assert.That(stripped.Select(v => v.Kind), Does.Contain(StrictStylingViolationKind.ClassDefDirective));
+        });
+    }
+
+    [Test]
+    public void RenderOptions_StrictStylingBlockModeRejectsClassDefBeforeLayout()
+    {
+        var provider = new CountingLayoutProvider(Mermaider.MermaidRenderer.LayoutProvider);
+        var presenter = new MermaidPresenter
+        {
+            Text = ClassDefFlowchart,
+            RenderOptions = new MermaidRenderOptions
+            {
+                LayoutProvider = provider,
+                Strict = new StrictStylingOptions { Mode = StrictStylingMode.Block }
+            }
+        };
+
+        Assert.DoesNotThrow(() => presenter.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity)));
+        Assert.Multiple(() =>
+        {
+            Assert.That(provider.FlowchartCalls, Is.EqualTo(0));
+            Assert.That(presenter.DesiredSize.Width, Is.GreaterThan(0));
+        });
     }
 
     [Test]
@@ -881,7 +907,7 @@ public class MermaidPresenterTests
 
         public int ErCalls { get; private set; }
 
-        public PositionedGraph LayoutFlowchart(MermaidGraph graph, MermaidRenderOptions? options = null, StrictModeOptions? strict = null)
+        public PositionedGraph LayoutFlowchart(MermaidGraph graph, MermaidRenderOptions? options = null, StrictStylingOptions? strict = null)
         {
             FlowchartCalls++;
             return fallback.LayoutFlowchart(graph, options, strict);
