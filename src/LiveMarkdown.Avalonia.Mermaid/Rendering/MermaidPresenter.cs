@@ -944,7 +944,15 @@ public class MermaidPresenter : Control
             var options = RenderOptions;
             if (options?.Strict is { } strict)
             {
-                StrictModeValidator.Validate(input.Lines, strict);
+                // Mermaider enforces strict styling in its render pipeline, which parses and lays out
+                // in one call. This presenter does those separately to measure, so the pre-pass has to
+                // run here or source-authored styling reaches layout unchecked.
+                var violations = new List<StrictStylingViolation>();
+                StrictStylingValidator.Validate(input.Lines, strict, violations);
+                if (violations.Count > 0)
+                {
+                    strict.OnStripped?.Invoke(violations);
+                }
             }
 
             var diagramType = DiagramDetector.Detect(input.CleanedText.AsSpan());
