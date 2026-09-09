@@ -1,3 +1,4 @@
+using Avalonia.Headless;
 using Avalonia.LogicalTree;
 using Markdig;
 using NUnit.Framework;
@@ -8,8 +9,14 @@ namespace LiveMarkdown.Avalonia.Tests;
 [NonParallelizable]
 public class MarkdownRendererStreamingTests
 {
+    private HeadlessUnitTestSession session = null!;
+
+    [OneTimeSetUp]
+    public void StartSession() => session = HeadlessSession.Current;
+
     [Test]
-    public void UpdatingOpenFenceInfo_ReplacesCodeBlockNodeWithMermaidBlockNode()
+    public Task UpdatingOpenFenceInfo_ReplacesCodeBlockNodeWithMermaidBlockNode() => session.Dispatch(
+        () =>
     {
         MarkdownNode.Register<MermaidBlockNode>();
         var pipeline = new MarkdownPipelineBuilder().UseMermaid().Build();
@@ -49,5 +56,6 @@ public class MarkdownRendererStreamingTests
 
         Assert.That(documentNode.Control.GetLogicalDescendants().OfType<CodeBlock>(), Is.Empty);
         Assert.That(documentNode.Control.GetLogicalDescendants().OfType<MermaidPresenter>(), Has.Exactly(1).Items);
-    }
+    },
+        CancellationToken.None);
 }

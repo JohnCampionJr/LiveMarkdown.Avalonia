@@ -85,6 +85,37 @@ public sealed class MarkdownUpdateProducer : AvaloniaObject, IMarkdownUpdateProd
         }
     }
 
+    /// <summary>
+    /// Gets or sets whether an append may be parsed as a trailing region of the document already
+    /// parsed, rather than by parsing the whole source again. Defaults to <see langword="true"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>The result is the same document either way — <see cref="IncrementalParse"/> says what
+    /// makes that true and which documents it refuses — but the cost is not. A keystroke into a
+    /// quarter-megabyte transcript re-parses about 250 KB of prose, which is 12 ms and 4 MB, and
+    /// copies the source to hand it to the parser, which is another 500 KB. Parsing the tail pays for
+    /// the block that changed.</para>
+    ///
+    /// <para>Turning it off makes every parse a whole-document parse, which is what the equality
+    /// tests compare against. Changing it invalidates the retained update.</para>
+    /// </remarks>
+    public bool IncrementalParsing
+    {
+        get
+        {
+            Dispatcher.VerifyAccess();
+            return field;
+        }
+        set
+        {
+            Dispatcher.VerifyAccess();
+            if (field == value) return;
+
+            field = value;
+            RestartParsing();
+        }
+    } = true;
+
     private ImmutableArray<Subscription> observers = [];
     private ObservableStringBuilder? markdownBuilder;
     private MarkdownDocumentUpdate? currentUpdate;
@@ -92,6 +123,21 @@ public sealed class MarkdownUpdateProducer : AvaloniaObject, IMarkdownUpdateProd
     private Task? parseTask;
     private int parseGeneration;
     private bool forceFullUpdate;
+
+    /// <summary>The document last published, mutated in place by each splice.</summary>
+    private Markdig.Syntax.MarkdownDocument? liveDocument;
+
+    /// <summary>The offset a splice re-parses from, or -1 when there is no usable restart point.</summary>
+    private int restartOffset = -1;
+
+    /// <summary>Whether the document is free of constructs a later line can reach back through.</summary>
+    private bool documentIsSpliceable;
+
+    /// <summary>Set when one update has to be parsed whole before splicing can resume.</summary>
+    private bool forceFullParseOnce;
+
+    /// <summary>Counts the appends parsed as a tail rather than whole. Read by the tests.</summary>
+    internal int SpliceCount { get; private set; }
 
     /// <inheritdoc/>
     public IDisposable Subscribe(IObserver<MarkdownDocumentUpdate> observer)
@@ -131,6 +177,10 @@ public sealed class MarkdownUpdateProducer : AvaloniaObject, IMarkdownUpdateProd
         pendingChange = null;
         currentUpdate = null;
         forceFullUpdate = true;
+        liveDocument = null;
+        restartOffset = -1;
+        documentIsSpliceable = false;
+        forceFullParseOnce = false;
 
         if (observers.IsEmpty || markdownBuilder is not { } source) return;
 
@@ -179,7 +229,20 @@ public sealed class MarkdownUpdateProducer : AvaloniaObject, IMarkdownUpdateProd
             {
                 var generation = parseGeneration;
                 var currentPipeline = Pipeline;
-                var snapshot = source.CaptureSnapshot();
+
+                // Only the last top-level block can be extended by text appended at the end, so a
+                // change that starts at or after that block re-parses correctly on its own.
+                var splice = IncrementalParsing
+                    && !forceFullParseOnce
+                    && !forceFullUpdate
+                    && currentUpdate is not null
+                    && liveDocument is not null
+                    && documentIsSpliceable
+                    && restartOffset > 0
+                    && change.StartIndex >= restartOffset;
+                var textOffset = splice ? restartOffset : 0;
+
+                var snapshot = splice ? source.CaptureSnapshot(textOffset) : source.CaptureSnapshot();
                 if (snapshot.Version != change.Version)
                 {
                     continue;
@@ -213,6 +276,39 @@ public sealed class MarkdownUpdateProducer : AvaloniaObject, IMarkdownUpdateProd
                 Dispatcher.VerifyAccess();
                 if (generation != parseGeneration) continue;
                 if (pendingChange is not { } latestChange || latestChange.Version != change.Version) continue;
+
+                if (splice)
+                {
+                    if (!IncrementalParse.CanSplice(document))
+                    {
+                        // The appended text defines a link, a footnote or an abbreviation, any of
+                        // which can rewrite text above the restart point. Take the document whole,
+                        // this time and from here on.
+                        documentIsSpliceable = false;
+                        continue;
+                    }
+
+                    IncrementalParse.Shift(document, textOffset);
+                    if (!IncrementalParse.TrySplice(liveDocument!, textOffset, document))
+                    {
+                        // The tail names a heading the document did not already carry, so a link to
+                        // it anywhere above would resolve differently. Take the whole source once;
+                        // the next append splices again.
+                        forceFullParseOnce = true;
+                        continue;
+                    }
+
+                    document = liveDocument!;
+                    SpliceCount++;
+                }
+                else
+                {
+                    documentIsSpliceable = IncrementalParse.CanSplice(document);
+                    forceFullParseOnce = false;
+                }
+
+                liveDocument = document;
+                restartOffset = IncrementalParse.RestartOffset(document, snapshot.Text, textOffset, restartOffset);
 
                 if (MarkdownRenderer.VerboseLogger?.IsValid is true)
                 {

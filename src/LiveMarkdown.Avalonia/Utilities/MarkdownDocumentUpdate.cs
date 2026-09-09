@@ -12,6 +12,12 @@ public abstract class MarkdownDocumentUpdate
     /// <summary>
     /// Gets the parsed Markdown document.
     /// </summary>
+    /// <remarks>
+    /// Only the most recent update's document is current. A producer parsing incrementally splices
+    /// each change into the document it published before, so an earlier update's <c>Document</c> is
+    /// the same object, moved on — read it while the update is the current one, or copy what is
+    /// needed out of it. See <see cref="MarkdownUpdateProducer.IncrementalParsing"/>.
+    /// </remarks>
     public MarkdownDocument Document { get; }
 
     /// <summary>

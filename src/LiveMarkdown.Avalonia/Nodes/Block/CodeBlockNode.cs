@@ -59,59 +59,26 @@ public class CodeBlockNode : BlockNode<Markdig.Syntax.CodeBlock>
 
         _codeBlock.SourceSpan = codeBlock.Span;
 
-        var inlines = _codeBlock.Inlines;
-        foreach (var (slice, lineIndex) in codeBlock.Lines.Lines.Take(codeBlock.Lines.Count).Select((l, i) => (l.Slice, i)))
+        // One highlight pass for the whole rewrite, below, rather than one per mutation: the control
+        // re-highlights on every change to its inlines, and highlighting walks the entire block.
+        using var highlightScope = _codeBlock.SuspendSyntaxHighlighting();
+
+        var lineCount = codeBlock.Lines.Count;
+        for (var lineIndex = 0; lineIndex < lineCount; lineIndex++)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var inlineIndex = lineIndex * 2;
+            var slice = codeBlock.Lines.Lines[lineIndex].Slice;
 
-            // Skip if the slice is completely outside the change range
-            if (inlines.Count > inlineIndex &&
+            // A line the change cannot have reached keeps what it has, which for a streaming block
+            // is every line but the last. The control decides which text block holds it.
+            if (lineIndex < _codeBlock.LineCount &&
                 (slice.End < change.StartIndex || change.StartIndex + change.Length <= slice.Start)) continue;
 
-            if (inlines.Count <= inlineIndex)
-            {
-                if (inlines.Count % 2 == 1)
-                {
-                    // we need to add a LineBreak before the new Run
-                    inlines.Add(new LineBreak());
-                }
-
-                inlines.Add(new Run(slice.ToString()));
-            }
-            else if (inlines[inlineIndex] is Run run)
-            {
-                // Update existing run
-                run.Text = slice.ToString();
-                run.Classes.Remove(SyntaxHighlighting.FormattedClassName);
-            }
-            else
-            {
-                // Replace it with a new run if it's not a Run
-                inlines[inlineIndex] = new Run(slice.ToString());
-            }
-
-            if (lineIndex < codeBlock.Lines.Count - 1)
-            {
-                // Add a line break after each line except the last one
-                if (inlines.Count <= inlineIndex + 1)
-                {
-                    inlines.Add(new LineBreak());
-                }
-                else if (inlines[inlineIndex + 1] is not LineBreak)
-                {
-                    // Replace it with a LineBreak if it's not a LineBreak
-                    inlines[inlineIndex + 1] = new LineBreak();
-                }
-            }
+            _codeBlock.SetLine(lineIndex, slice.ToString());
         }
 
-        while (inlines.Count > codeBlock.Lines.Count * 2 - 1)
-        {
-            // Remove excess inlines
-            inlines.RemoveAt(inlines.Count - 1);
-        }
+        _codeBlock.TrimLines(lineCount);
 
         // Highlighting only works for closed FencedCodeBlock with Info
         if (codeBlock is not FencedCodeBlock fencedCodeBlock) return true;

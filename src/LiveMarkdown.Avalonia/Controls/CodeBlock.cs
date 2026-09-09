@@ -1,4 +1,5 @@
 ﻿using System.Collections.Specialized;
+using System.Text;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Documents;
@@ -16,7 +17,7 @@ namespace LiveMarkdown.Avalonia;
 /// Represents a code block in a Markdown document.
 /// This control is used to display code snippets with optional syntax highlighting.
 /// </summary>
-[TemplatePart(CodeTextBlockName, typeof(MarkdownTextBlock), IsRequired = true)]
+[TemplatePart(CodeLinesPanelName, typeof(Panel), IsRequired = true)]
 [TemplatePart(ScrollViewerName, typeof(ScrollViewer), IsRequired = false)]
 [TemplatePart(LanguageTextBlockName, typeof(TextBlock), IsRequired = false)]
 [TemplatePart(ToggleTextWrapButtonName, typeof(ToggleButton), IsRequired = false)]
@@ -24,7 +25,7 @@ namespace LiveMarkdown.Avalonia;
 public class CodeBlock : TemplatedControl
 {
     private const string ScrollViewerName = "PART_ScrollViewer";
-    private const string CodeTextBlockName = "PART_CodeTextBlock";
+    private const string CodeLinesPanelName = "PART_CodeLines";
     private const string LanguageTextBlockName = "PART_LanguageTextBlock";
     private const string ToggleTextWrapButtonName = "PART_ToggleTextWrapButton";
     private const string CopyButtonName = "PART_CopyButton";
@@ -152,34 +153,192 @@ public class CodeBlock : TemplatedControl
         IsCodeWrapped ? ScrollBarVisibility.Disabled : ScrollBarVisibility.Auto;
 
     /// <summary>
-    /// An alternative property of <see cref="Inlines"/> to set the code content and apply syntax highlighting automatically.
+    /// Gets or sets the whole code content, and applies syntax highlighting to it.
     /// </summary>
     public string? Code
     {
-        get => Inlines.Text;
+        get
+        {
+            if (chunks.Count == 0) return null;
+            if (chunks.Count == 1) return chunks[0].ActualText;
+
+            var text = new StringBuilder();
+            for (var i = 0; i < chunks.Count; i++)
+            {
+                if (i > 0) text.Append(Environment.NewLine);
+                text.Append(chunks[i].ActualText);
+            }
+
+            return text.ToString();
+        }
+
         set
         {
-            Inlines.Clear();
-            if (value is null) return;
-
-            // pause applying syntax highlighting while adding lines
-            isApplyingSyntaxHighlighting = true;
-            var lines = value.Split(["\r\n", "\r", "\n"], StringSplitOptions.None);
-            for (var i = 0; i < lines.Length; i++)
+            using (SuspendSyntaxHighlighting())
             {
-                Inlines.Add(lines[i]);
-                if (i < lines.Length - 1) Inlines.Add(new LineBreak());
+                if (value is null)
+                {
+                    TrimLines(0);
+                }
+                else
+                {
+                    var lines = value.Split(["\r\n", "\r", "\n"], StringSplitOptions.None);
+                    for (var i = 0; i < lines.Length; i++) SetLine(i, lines[i]);
+                    TrimLines(lines.Length);
+                }
             }
-            isApplyingSyntaxHighlighting = false;
 
             if (AutoSyntaxHighlight) HighlightSyntax();
         }
     }
 
     /// <summary>
-    /// Gets the inline collection containing the code content.
+    /// Gets the inline collection of the FIRST text block holding this code.
     /// </summary>
-    public InlineCollection Inlines { get; } = new();
+    /// <remarks>
+    /// A long block is split across several text blocks so that appending a line re-measures only
+    /// the last of them (see <see cref="LinesPerChunk"/>), so this is the whole content only while
+    /// the code is short enough to be one. <see cref="Code"/> reads all of them;
+    /// <see cref="CodeTextBlocks"/> is the full list.
+    /// </remarks>
+    public InlineCollection Inlines => EnsureChunk(0).Inlines!;
+
+    /// <summary>
+    /// How many lines one text block holds.
+    /// </summary>
+    /// <remarks>
+    /// A text block lays out as a single unit, so appending one line to a block of N re-measures and
+    /// re-shapes all N -- which makes a streaming code block quadratic in its own length. Splitting
+    /// it means an append pays for the tail only. Measured by streaming 200 lines and watching what
+    /// one appended line costs in layout: 2,112 KB at 64 lines to a block, 971 at 32, 512 at 16, 297
+    /// at 8, 180 at 4. Linear in the chunk, so what stops it going lower is what a block costs on its
+    /// own -- by 4 the per-append node work has overtaken the layout, and a 200-line block would be
+    /// 50 controls for selection and search to walk. Eight is where those meet.
+    /// </remarks>
+    internal static int LinesPerChunk = 8;
+
+    /// <summary>Gets the text blocks this code is laid out in, in order.</summary>
+    public IReadOnlyList<MarkdownTextBlock> CodeTextBlocks => chunks;
+
+    private readonly List<MarkdownTextBlock> chunks = [];
+    private Panel? linesPanel;
+
+    /// <summary>Gets the number of code lines currently held.</summary>
+    internal int LineCount => lineTexts.Count;
+
+    /// <summary>
+    /// Each line's plain text, as it was set.
+    /// </summary>
+    /// <remarks>
+    /// Highlighting turns a line into a Span of styled runs, and it needs that line's text to key its
+    /// tokens and to carry the rule stack into the next line. Concatenating the runs back together to
+    /// get it costs a string per line of the WHOLE block on every append, for text this control was
+    /// handed in the first place -- so it is kept instead.
+    /// </remarks>
+    private readonly List<string> lineTexts = [];
+
+    /// <summary>The plain text of every line, in order.</summary>
+    internal IReadOnlyList<string> LineTexts => lineTexts;
+
+    /// <summary>The inline collections of every text block, for one highlighting pass over all of them.</summary>
+    private IReadOnlyList<InlineCollection> ChunkInlines()
+    {
+        var collections = new InlineCollection[chunks.Count];
+        for (var i = 0; i < chunks.Count; i++) collections[i] = chunks[i].Inlines!;
+        return collections;
+    }
+
+    /// <summary>Creates text blocks up to and including <paramref name="index"/>, and returns that one.</summary>
+    private MarkdownTextBlock EnsureChunk(int index)
+    {
+        while (chunks.Count <= index)
+        {
+            var block = new MarkdownTextBlock
+            {
+                Inlines = new InlineCollection(),
+                SourceSpan = SourceSpan,
+
+                // Each block would otherwise round its own height up to a whole pixel, so every
+                // extra one added a pixel and pushed the code below it down -- the same code laid
+                // out as one block or several has to land in the same place.
+                UseLayoutRounding = false,
+            };
+
+            // What the template used to bind on its single text block. Neither can be left to
+            // inheritance: the base MarkdownTextBlock style SETS FontFamily, and a style setter beats
+            // an inherited value, so a block that does not bind it renders code in the proportional
+            // UI font. TextWrapping is not an inherited property at all.
+            block.Bind(TemplatedControl.FontFamilyProperty, this.GetObservable(FontFamilyProperty));
+            block.Bind(TextBlock.TextWrappingProperty, this.GetObservable(TextWrappingProperty));
+            if (AutoSyntaxHighlight) block.Inlines!.CollectionChanged += HandleInlinesChanged;
+
+            chunks.Add(block);
+            linesPanel?.Children.Add(block);
+        }
+
+        return chunks[index];
+    }
+
+    /// <summary>Sets the text of one code line, creating the text block that holds it if needed.</summary>
+    /// <remarks>Lines are expected in ascending order, which is how a block is built and grown.</remarks>
+    internal void SetLine(int lineIndex, string text)
+    {
+        var inlines = EnsureChunk(lineIndex / LinesPerChunk).Inlines!;
+        var indexInChunk = lineIndex % LinesPerChunk;
+        var offset = indexInChunk * 2;
+
+        // A chunk alternates Run, LineBreak, Run ... so a line sits at an even index. Fill any gap,
+        // which only arises if a caller skips a line.
+        while (inlines.Count < offset)
+        {
+            inlines.Add(inlines.Count % 2 == 0 ? new Run(string.Empty) : new LineBreak());
+        }
+
+        if (inlines.Count == offset)
+        {
+            if (indexInChunk > 0 && inlines[offset - 1] is not LineBreak) inlines[offset - 1] = new LineBreak();
+            inlines.Add(new Run(text));
+        }
+        else if (inlines[offset] is Run existing)
+        {
+            if (!string.Equals(existing.Text, text, StringComparison.Ordinal))
+            {
+                existing.Text = text;
+                existing.Classes.Remove(SyntaxHighlighting.FormattedClassName);
+            }
+        }
+        else
+        {
+            // A formatted line is a Span of styled runs; rewriting it starts again from plain text.
+            inlines[offset] = new Run(text);
+        }
+
+        while (lineTexts.Count <= lineIndex) lineTexts.Add(string.Empty);
+        lineTexts[lineIndex] = text;
+    }
+
+    /// <summary>Drops every line at or past <paramref name="count"/>.</summary>
+    internal void TrimLines(int count)
+    {
+        var neededChunks = count == 0 ? 0 : (count - 1) / LinesPerChunk + 1;
+        while (chunks.Count > neededChunks)
+        {
+            var block = chunks[^1];
+            if (block.Inlines is { } blockInlines) blockInlines.CollectionChanged -= HandleInlinesChanged;
+            linesPanel?.Children.Remove(block);
+            chunks.RemoveAt(chunks.Count - 1);
+        }
+
+        if (chunks.Count > 0)
+        {
+            var inlines = chunks[^1].Inlines!;
+            var linesInLast = count - ((chunks.Count - 1) * LinesPerChunk);
+            var keep = Math.Max(0, (linesInLast * 2) - 1);
+            while (inlines.Count > keep) inlines.RemoveAt(inlines.Count - 1);
+        }
+
+        if (lineTexts.Count > count) lineTexts.RemoveRange(count, lineTexts.Count - count);
+    }
 
     /// <summary>
     /// Defines the <see cref="CopyingToClipboard"/> event.
@@ -198,9 +357,10 @@ public class CodeBlock : TemplatedControl
     }
 
     /// <summary>
-    /// Gets the <see cref="MarkdownTextBlock"/> control defined in the template, which is used to display the code content with syntax highlighting.
+    /// Gets the first <see cref="MarkdownTextBlock"/> holding this code, or null before any line is
+    /// set. A long block has more; see <see cref="CodeTextBlocks"/>.
     /// </summary>
-    public MarkdownTextBlock? CodeTextBlock { get; private set; }
+    public MarkdownTextBlock? CodeTextBlock => chunks.Count > 0 ? chunks[0] : null;
 
     /// <summary>
     /// Gets or sets the Markdown source span represented by the code text layout.
@@ -212,25 +372,57 @@ public class CodeBlock : TemplatedControl
         set
         {
             field = value;
-            if (CodeTextBlock is not null) CodeTextBlock.SourceSpan = value;
+            foreach (var chunk in chunks) chunk.SourceSpan = value;
         }
     }
 
     private ScrollViewer? _scrollViewer;
     private IDisposable? _copyButtonClickedSubscription;
     private bool isApplyingSyntaxHighlighting; // prevent re-entrance
+    private int suspendedHighlightCount;
+
+    /// <summary>
+    /// How many times this block has walked itself to highlight. A rewrite of the inlines should
+    /// cost ONE, however many pieces it arrives in; see <see cref="SuspendSyntaxHighlighting"/>.
+    /// </summary>
+    internal int SyntaxHighlightPassCount { get; private set; }
 
     /// <summary>
     /// Initializes a new instance of the <see cref="CodeBlock"/> class.
     /// </summary>
     public CodeBlock()
     {
-        Inlines.CollectionChanged += HandleInlinesChanged;
     }
 
     private void HandleInlinesChanged(object? sender, NotifyCollectionChangedEventArgs e)
     {
+        if (suspendedHighlightCount > 0) return;
+
         HighlightSyntax();
+    }
+
+    /// <summary>
+    /// Holds off automatic highlighting until the returned scope is disposed, for a caller about to
+    /// rewrite <see cref="Inlines"/> a piece at a time.
+    /// </summary>
+    /// <remarks>
+    /// Every mutation of the collection otherwise re-enters highlighting, and highlighting walks the
+    /// whole block to find its lines -- so rewriting one line of a long block walked it several times
+    /// over to reach the same answer the last walk would have.
+    /// </remarks>
+    internal SuspendedHighlightScope SuspendSyntaxHighlighting()
+    {
+        suspendedHighlightCount++;
+        return new SuspendedHighlightScope(this);
+    }
+
+    /// <summary>The scope returned by <see cref="SuspendSyntaxHighlighting"/>.</summary>
+    internal readonly struct SuspendedHighlightScope(CodeBlock owner) : IDisposable
+    {
+        public void Dispose()
+        {
+            if (owner.suspendedHighlightCount > 0) owner.suspendedHighlightCount--;
+        }
     }
 
     /// <summary>
@@ -247,14 +439,19 @@ public class CodeBlock : TemplatedControl
             _copyButtonClickedSubscription = null;
         }
 
-        CodeTextBlock = e.NameScope.Find<MarkdownTextBlock>(CodeTextBlockName);
-        if (CodeTextBlock is null)
+        linesPanel = e.NameScope.Find<Panel>(CodeLinesPanelName);
+        if (linesPanel is null)
         {
-            throw new InvalidOperationException($"{CodeTextBlockName} is not found in the template.");
+            throw new InvalidOperationException($"{CodeLinesPanelName} is not found in the template.");
         }
 
-        CodeTextBlock.Inlines = Inlines;
-        CodeTextBlock.SourceSpan = SourceSpan;
+        // Any text block built before the template arrived joins it now, in order.
+        linesPanel.Children.Clear();
+        foreach (var chunk in chunks)
+        {
+            chunk.SourceSpan = SourceSpan;
+            linesPanel.Children.Add(chunk);
+        }
 
         _scrollViewer = e.NameScope.Find<ScrollViewer>(ScrollViewerName);
 
@@ -290,13 +487,12 @@ public class CodeBlock : TemplatedControl
         }
         else if (change.Property == AutoSyntaxHighlightProperty)
         {
-            if (change.NewValue is true)
+            foreach (var chunk in chunks)
             {
-                Inlines.CollectionChanged += HandleInlinesChanged;
-            }
-            else
-            {
-                Inlines.CollectionChanged -= HandleInlinesChanged;
+                if (chunk.Inlines is not { } chunkInlines) continue;
+
+                if (change.NewValue is true) chunkInlines.CollectionChanged += HandleInlinesChanged;
+                else chunkInlines.CollectionChanged -= HandleInlinesChanged;
             }
         }
         else if (change.Property == IsCodeWrappedProperty)
@@ -313,11 +509,11 @@ public class CodeBlock : TemplatedControl
                 (ScrollBarVisibility.Disabled, ScrollBarVisibility.Auto);
             RaisePropertyChanged(HorizontalScrollBarVisibilityProperty, scrollBarVisibilityOldValue, scrollBarVisibilityNewValue);
 
-            if (_scrollViewer is not null && CodeTextBlock is not null)
+            if (_scrollViewer is not null && linesPanel is not null)
             {
-                CodeTextBlock.Width = _scrollViewer.Viewport.Width;
-                CodeTextBlock.UpdateLayout(); // fix bug that the text block does not resize correctly
-                CodeTextBlock.Width = double.NaN;
+                linesPanel.Width = _scrollViewer.Viewport.Width;
+                linesPanel.UpdateLayout(); // fix bug that the text does not resize correctly
+                linesPanel.Width = double.NaN;
             }
         }
     }
@@ -328,12 +524,13 @@ public class CodeBlock : TemplatedControl
     public void HighlightSyntax()
     {
         if (isApplyingSyntaxHighlighting) return;
-        if (string.IsNullOrWhiteSpace(Language) || Inlines.Count == 0) return;
+        if (string.IsNullOrWhiteSpace(Language) || LineCount == 0) return;
 
+        SyntaxHighlightPassCount++;
         isApplyingSyntaxHighlighting = true;
         try
         {
-            SyntaxHighlighting.Create(Language.ToLower()).FormatInlines(Inlines, ColorTheme, CustomColorTheme);
+            SyntaxHighlighting.Create(Language.ToLower()).FormatInlines(ChunkInlines(), ColorTheme, CustomColorTheme, lineTexts);
         }
         finally
         {
@@ -349,7 +546,7 @@ public class CodeBlock : TemplatedControl
             RaiseEvent(copyEventArgs);
             if (copyEventArgs.Handled) return;
 
-            var text = Inlines.Text;
+            var text = Code;
             if (string.IsNullOrEmpty(text)) return;
 
             if (TopLevel.GetTopLevel(this)?.Clipboard is not { } clipboard)

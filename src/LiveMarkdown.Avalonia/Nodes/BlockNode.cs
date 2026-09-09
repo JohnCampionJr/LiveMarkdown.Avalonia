@@ -1,4 +1,6 @@
-﻿using System.Runtime.CompilerServices;
+﻿using System.Collections.Concurrent;
+using System.Collections.Immutable;
+using System.Runtime.CompilerServices;
 using Avalonia.Controls;
 using Markdig.Syntax;
 
@@ -22,12 +24,49 @@ public abstract class BlockNode : MarkdownNode
     /// <returns><see langword="true"/> when a more specific compatible block factory is registered.</returns>
     public static bool HasMoreSpecificBlockNodeFactory(Type blockType, Type fallbackMarkdownType)
     {
-        return NodeFactories
-            .OfType<IMarkdownNodeFactory<BlockNode>>()
-            .Any(factory =>
-                factory.MarkdownType != fallbackMarkdownType &&
-                fallbackMarkdownType.IsAssignableFrom(factory.MarkdownType) &&
-                factory.MarkdownType.IsAssignableFrom(blockType));
+        var lookup = Lookup();
+        return lookup.MoreSpecific.GetOrAdd(
+            (blockType, fallbackMarkdownType),
+            static (key, factories) => factories
+                .OfType<IMarkdownNodeFactory<BlockNode>>()
+                .Any(factory =>
+                    factory.MarkdownType != key.Fallback &&
+                    key.Fallback.IsAssignableFrom(factory.MarkdownType) &&
+                    factory.MarkdownType.IsAssignableFrom(key.Block)),
+            lookup.Factories);
+    }
+
+    /// <summary>
+    /// The answers the registered factories give, kept per set of factories.
+    /// </summary>
+    /// <remarks>
+    /// Both questions below are asked once per node built and once per block projected, and neither
+    /// depends on anything but the runtime type and the registered set: a document of 856 blocks and
+    /// 2,880 inlines asked them several thousand times to receive a few dozen distinct answers, each
+    /// time sorting the matching factories afresh.
+    ///
+    /// <para>The cache belongs to ONE factory set, and a new set gets a new cache rather than a
+    /// cleared one, so an answer computed from the old set can never be read back against the new.
+    /// <see cref="MarkdownNode.Edit"/> replaces the set wholesale, which is what makes that work.</para>
+    /// </remarks>
+    private sealed class FactoryLookup(ImmutableHashSet<IMarkdownNodeFactory> factories)
+    {
+        public ImmutableHashSet<IMarkdownNodeFactory> Factories { get; } = factories;
+
+        public ConcurrentDictionary<Type, IMarkdownNodeFactory<BlockNode>?> ByType { get; } = new();
+
+        public ConcurrentDictionary<(Type Block, Type Fallback), bool> MoreSpecific { get; } = new();
+    }
+
+    private static FactoryLookup? lookup;
+
+    private static FactoryLookup Lookup()
+    {
+        var factories = NodeFactories;
+        var current = lookup;
+        return current is not null && ReferenceEquals(current.Factories, factories)
+            ? current
+            : lookup = new FactoryLookup(factories);
     }
 
     /// <summary>
@@ -46,14 +85,19 @@ public abstract class BlockNode : MarkdownNode
     {
         var type = block.GetType();
 
-        // First try to find an exact match, then try to find a compatible type
-        var node = NodeFactories
+        // First the exact match, then the most specific compatible one. Which factory that is depends
+        // only on the type, so it is resolved once per type rather than per node.
+        var lookup = Lookup();
+        var factory = lookup.ByType.GetOrAdd(
+            type,
+            static (blockType, factories) => factories
                 .OfType<IMarkdownNodeFactory<BlockNode>>()
-                .Where(f => f.MarkdownType.IsAssignableFrom(type))
+                .Where(f => f.MarkdownType.IsAssignableFrom(blockType))
                 .OrderBy(f => f)
-                .Select(f => f.CreateNode())
-                .FirstOrDefault()
-            ?? new NotImplementedBlockNode(block.GetType());
+                .FirstOrDefault(),
+            lookup.Factories);
+
+        var node = factory?.CreateNode() ?? new NotImplementedBlockNode(type);
 
         node.Update(documentNode, block, change, cancellationToken);
         return node;

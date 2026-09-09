@@ -1,4 +1,6 @@
-﻿using System.Runtime.CompilerServices;
+﻿using System.Collections.Concurrent;
+using System.Collections.Immutable;
+using System.Runtime.CompilerServices;
 using Avalonia.Controls.Documents;
 using Markdig.Syntax;
 
@@ -19,10 +21,40 @@ public abstract class InlineNode : MarkdownNode
     /// </summary>
     /// <param name="inlineType">The runtime Markdig inline type.</param>
     /// <returns><see langword="true"/> when a compatible inline factory is registered.</returns>
-    public static bool HasRegisteredInlineNodeFactory(Type inlineType) =>
-        NodeFactories
-            .OfType<IMarkdownNodeFactory<InlineNode>>()
-            .Any(factory => factory.MarkdownType.IsAssignableFrom(inlineType));
+    public static bool HasRegisteredInlineNodeFactory(Type inlineType)
+    {
+        var lookup = Lookup();
+        return lookup.Registered.GetOrAdd(
+            inlineType,
+            static (type, factories) => factories
+                .OfType<IMarkdownNodeFactory<InlineNode>>()
+                .Any(factory => factory.MarkdownType.IsAssignableFrom(type)),
+            lookup.Factories);
+    }
+
+    /// <summary>
+    /// The answers the registered factories give, kept per set of factories. See the same type on
+    /// <see cref="BlockNode"/> for why it is per set rather than cleared.
+    /// </summary>
+    private sealed class FactoryLookup(ImmutableHashSet<IMarkdownNodeFactory> factories)
+    {
+        public ImmutableHashSet<IMarkdownNodeFactory> Factories { get; } = factories;
+
+        public ConcurrentDictionary<Type, IMarkdownNodeFactory<InlineNode>?> ByType { get; } = new();
+
+        public ConcurrentDictionary<Type, bool> Registered { get; } = new();
+    }
+
+    private static FactoryLookup? lookup;
+
+    private static FactoryLookup Lookup()
+    {
+        var factories = NodeFactories;
+        var current = lookup;
+        return current is not null && ReferenceEquals(current.Factories, factories)
+            ? current
+            : lookup = new FactoryLookup(factories);
+    }
 
     /// <summary>
     /// Creates and initializes a node for the specified Markdig inline.
@@ -40,14 +72,19 @@ public abstract class InlineNode : MarkdownNode
     {
         var type = inline.GetType();
 
-        // First try to find an exact match, then try to find a compatible type
-        var node = NodeFactories
+        // First the exact match, then the most specific compatible one. Which factory that is depends
+        // only on the type, so it is resolved once per type rather than per inline.
+        var lookup = Lookup();
+        var factory = lookup.ByType.GetOrAdd(
+            type,
+            static (inlineType, factories) => factories
                 .OfType<IMarkdownNodeFactory<InlineNode>>()
-                .Where(f => f.MarkdownType.IsAssignableFrom(type))
+                .Where(f => f.MarkdownType.IsAssignableFrom(inlineType))
                 .OrderBy(f => f)
-                .Select(f => f.CreateNode())
-                .FirstOrDefault()
-            ?? new NotImplementedInlineNode(inline.GetType());
+                .FirstOrDefault(),
+            lookup.Factories);
+
+        var node = factory?.CreateNode() ?? new NotImplementedInlineNode(type);
 
         node.Update(documentNode, inline, change, cancellationToken);
         return node;

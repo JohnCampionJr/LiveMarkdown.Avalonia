@@ -27,6 +27,55 @@ public class CodeInlineHitTestTests
         // Shared for the whole assembly — see HeadlessSession. Deliberately not disposed.
     }
 
+    [Test]
+    public async Task TwoChipsWithTheSameTextAreDrawnInTheirOwnPlaces()
+    {
+        // Chips are shaped once per (text, typography) and the shaped form is reused, because what
+        // changes between measures is only where a chip SITS. Two chips reading the same thing share
+        // that form, so this is the test that its position did not come along with it.
+        var result = await session.Dispatch(
+            () =>
+            {
+                var first = new CodeInline { Text = "same", Background = Brushes.Gainsboro };
+                var second = new CodeInline { Text = "same", Background = Brushes.Gainsboro };
+                var block = new MarkdownTextBlock { FontSize = 16, FontFamily = FontFamily.Default };
+                block.Inlines!.Add(new Run("start "));
+                block.Inlines!.Add(first);
+                block.Inlines!.Add(new Run(" middle "));
+                block.Inlines!.Add(second);
+                block.Inlines!.Add(new Run(" end"));
+
+                var window = new Window { Width = 600, Height = 300, Content = block };
+                try
+                {
+                    window.Show();
+
+                    var firstRects = block.GetCodeInlineRects(first);
+                    var secondRects = block.GetCodeInlineRects(second);
+                    return (
+                        First: firstRects.Count > 0 ? firstRects[0] : default,
+                        Second: secondRects.Count > 0 ? secondRects[0] : default,
+                        FirstHit: block.GetCodeInlineAt(firstRects[0].Center) == first,
+                        SecondHit: block.GetCodeInlineAt(secondRects[0].Center) == second);
+                }
+                finally
+                {
+                    window.Close();
+                }
+            },
+            CancellationToken.None);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(result.First.Width, Is.GreaterThan(0), "the first chip was laid out");
+            Assert.That(result.Second.Width, Is.GreaterThan(0), "and so was the second");
+            Assert.That(result.Second.X, Is.GreaterThan(result.First.X), "the second sits after the first, not on top of it");
+            Assert.That(result.First.Width, Is.EqualTo(result.Second.Width).Within(0.01), "same text, same width");
+            Assert.That(result.FirstHit, Is.True, "a point on the first chip finds the first");
+            Assert.That(result.SecondHit, Is.True, "and a point on the second finds the second");
+        });
+    }
+
     /// <summary>A laid-out block: "before " + `chip` + " after".</summary>
     private static (MarkdownTextBlock Block, CodeInline Chip, Window Window) Build(
         string before = "before ", string chipText = "chip", string after = " after", double width = 600)

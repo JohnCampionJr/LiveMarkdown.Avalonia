@@ -154,7 +154,9 @@ public class MarkdownPointerSelectionTests
                 {
                     window.Show();
 
-                    var start = first.TranslatePoint(new Point(5, first.Bounds.Height / 2), window) ?? new Point(5, 15);
+                    // Press at the block's left edge, before the first glyph. A few pixels in lands inside the
+                    // 'f' with a real font and the caret snaps past it, dropping the first letter.
+                    var start = first.TranslatePoint(new Point(1, first.Bounds.Height / 2), window) ?? new Point(1, 15);
                     var end = second.TranslatePoint(new Point(second.Bounds.Width + 10, second.Bounds.Height / 2), window) ?? new Point(180, 55);
                     window.MouseMove(start);
                     window.MouseDown(start, MouseButton.Left);
@@ -1267,6 +1269,15 @@ public class MarkdownPointerSelectionTests
 
     public sealed class StyledTestApplication : Application
     {
+        // Skia + a real font family with Bold and Italic faces, so text metrics and allocations match a
+        // shipping app. The headless drawing stub ships a 1 KB font with one face and re-creates a
+        // synthetic typeface, 65 KB each, for every Bold or Italic lookup.
+        public static AppBuilder BuildAvaloniaApp() => AppBuilder.Configure<StyledTestApplication>()
+            .UseHeadless(new AvaloniaHeadlessPlatformOptions { UseHeadlessDrawing = false })
+            .UseSkia()
+            .WithInterFont()
+            .With(new FontManagerOptions { DefaultFamilyName = "fonts:Inter#Inter" });
+
         public override void Initialize()
         {
             Styles.Add(
