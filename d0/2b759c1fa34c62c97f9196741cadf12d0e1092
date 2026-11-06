@@ -1,0 +1,13 @@
+tests/LiveMarkdown.Avalonia.Tests/RenderCostTests.cs
+  ai_agent 1,5-8,10,14,142-339
+src/LiveMarkdown.Avalonia/Controls/MarkdownTextBlock.cs
+  ai_agent 350-352
+src/LiveMarkdown.Avalonia/Controls/CodeBlock.cs
+  ai_agent 10,221-234,240,263,292,298-362,367-369,399-400,403,413-415,422,428-432,534-537,541,543-544,567-571,587,634-638
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "d02b759c1fa34c62c97f9196741cadf12d0e1092",
+  "prompts": {}
+}
