@@ -1,0 +1,35 @@
+live-markdown/tests/LiveMarkdown.Avalonia.Tests/RenderCostTests.cs
+  s_39a534ffa60717::t_637403632fe0d8 142-144,149,186,201-216,220-225,227-228,240-262,283-286,343,346-374
+  s_39a534ffa60717::t_34ec2c88f93a7b 226,230-231,233-236,239,275
+  s_39a534ffa60717::t_2a0f62b8a41145 6,8,14
+  s_39a534ffa60717::t_2124e6ecfb3f03 7
+  s_39a534ffa60717::t_960b249fef9ec0 292-326
+  s_39a534ffa60717::t_86e13cd71f70cb 1,145-148,150,152,157,159,179,190-191,193,200,345
+  s_39a534ffa60717::t_2b1c4caf4da38c 5,10,151,153-156,158,160-178,180-185,187-189,192,194-199,217-219,229,232,237-238,263-274,276-282,287-291,327-342,344
+live-markdown/src/LiveMarkdown.Avalonia/Controls/CodeBlock.cs
+  s_39a534ffa60717::t_00ec13b436f01e 224,292,298-301,314-315,336,356,542,544-545
+  s_39a534ffa60717::t_637403632fe0d8 305
+  s_39a534ffa60717::t_e2794891afd727 10
+  s_39a534ffa60717::t_d11655448ac785 221-223,225-234,318-329,332-335,342-346,400-401,568-572,635-639
+  s_39a534ffa60717::t_960b249fef9ec0 302,306
+  s_39a534ffa60717::t_9100191a7bba2b 240,263,303-304,307-313,316-317,337-341,347-355,357-363,368-370,404,415-416,423,429-433,535-538
+  s_39a534ffa60717::t_34ec2c88f93a7b 330-331,414,588
+live-markdown/src/LiveMarkdown.Avalonia/Controls/MarkdownTextBlock.cs
+  s_39a534ffa60717::t_34ec2c88f93a7b 379-381
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "6fe284b0ec0c633549384b49bf1a52702a75d4ce",
+  "prompts": {},
+  "sessions": {
+    "s_39a534ffa60717": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19231-69fb-79d1-8545-fbf1d4a89679",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "John Campion Jr <john@brightshore.io>"
+    }
+  }
+}
