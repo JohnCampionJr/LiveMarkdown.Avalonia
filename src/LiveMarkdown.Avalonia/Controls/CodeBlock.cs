@@ -7,6 +7,7 @@ using Avalonia.Controls.Metadata;
 using Avalonia.Controls.Primitives;
 using Avalonia.Input.Platform;
 using Avalonia.Interactivity;
+using Avalonia.Layout;
 using Avalonia.Media;
 using Markdig.Syntax;
 using TextMateSharp.Grammars;
@@ -217,11 +218,26 @@ public class CodeBlock : TemplatedControl
     /// </remarks>
     internal static int LinesPerChunk = 8;
 
+    /// <summary>Defines the <see cref="DeferOffscreenChunkStyling"/> property.</summary>
+    public static readonly StyledProperty<bool> DeferOffscreenChunkStylingProperty =
+        AvaloniaProperty.Register<CodeBlock, bool>(nameof(DeferOffscreenChunkStyling));
+
+    /// <summary>
+    /// Gets or sets whether eligible chunks initially lay out as plain text and attach their syntax
+    /// styles when scrolled into view. All chunks still participate in wrapping, search and selection.
+    /// </summary>
+    public bool DeferOffscreenChunkStyling
+    {
+        get => GetValue(DeferOffscreenChunkStylingProperty);
+        set => SetValue(DeferOffscreenChunkStylingProperty, value);
+    }
+
     /// <summary>Gets the text blocks this code is laid out in, in order.</summary>
     public IReadOnlyList<MarkdownTextBlock> CodeTextBlocks => chunks;
 
     private readonly List<MarkdownTextBlock> chunks = [];
     private Panel? linesPanel;
+    private Dictionary<MarkdownTextBlock, InlineCollection>? deferredInlines;
 
     /// <summary>Gets the number of code lines currently held.</summary>
     internal int LineCount => lineTexts.Count;
@@ -244,7 +260,7 @@ public class CodeBlock : TemplatedControl
     private IReadOnlyList<InlineCollection> ChunkInlines()
     {
         var collections = new InlineCollection[chunks.Count];
-        for (var i = 0; i < chunks.Count; i++) collections[i] = chunks[i].Inlines!;
+        for (var i = 0; i < chunks.Count; i++) collections[i] = InlinesOf(chunks[i]);
         return collections;
     }
 
@@ -273,17 +289,84 @@ public class CodeBlock : TemplatedControl
             if (AutoSyntaxHighlight) block.Inlines!.CollectionChanged += HandleInlinesChanged;
 
             chunks.Add(block);
-            linesPanel?.Children.Add(block);
+            AttachChunk(chunks.Count - 1);
         }
 
         return chunks[index];
+    }
+
+    private void AttachChunk(int index)
+    {
+        if (linesPanel is not { } panel) return;
+        var block = chunks[index];
+        if (DeferOffscreenChunkStyling && index > 0 && block.Inlines is { Count: > 0 } inlines && CanDefer(inlines))
+        {
+            // Keep the same searchable, selectable text block in the tree. Its plain text can wrap
+            // and keep its scroll coordinates before its styled inline children are attached.
+            var text = inlines.LayoutText;
+            (deferredInlines ??= new()).Add(block, inlines);
+            block.Inlines = null;
+            block.Text = text;
+            block.EffectiveViewportChanged += OnDeferredChunkViewportChanged;
+        }
+        panel.Children.Add(block);
+    }
+
+    private InlineCollection InlinesOf(MarkdownTextBlock block) =>
+        deferredInlines?.GetValueOrDefault(block) ?? block.Inlines!;
+
+    private static bool CanDefer(InlineCollection inlines)
+    {
+        foreach (var inline in inlines)
+        {
+            // Font overrides can change both the width and line height, even for monospaced code.
+            if (inline.IsSet(TextElement.FontFamilyProperty) || inline.IsSet(TextElement.FontSizeProperty) ||
+                inline.IsSet(TextElement.FontStyleProperty) || inline.IsSet(TextElement.FontWeightProperty) ||
+                inline.IsSet(TextElement.FontStretchProperty) || inline.IsSet(TextElement.FontFeaturesProperty) ||
+                inline.IsSet(Inline.BaselineAlignmentProperty))
+                return false;
+
+            if (inline.GetType() != typeof(Run) && inline is not LineBreak &&
+                (inline is not Span span || inline.GetType() != typeof(Span) || !CanDefer(span.Inlines)))
+                return false;
+        }
+        return true;
+    }
+
+    private void OnDeferredChunkViewportChanged(object? sender, EffectiveViewportChangedEventArgs args)
+    {
+        if (sender is not MarkdownTextBlock block) return;
+        var viewport = args.EffectiveViewport;
+        if (viewport.Height <= 0 || viewport.Bottom <= 0 || viewport.Top >= block.Bounds.Height) return;
+        RestoreChunkStyling(block);
+    }
+
+    private void RestoreChunkStyling(MarkdownTextBlock block)
+    {
+        if (deferredInlines?.Remove(block, out var inlines) != true) return;
+        block.EffectiveViewportChanged -= OnDeferredChunkViewportChanged;
+        var start = block.SelectionStart;
+        var end = block.SelectionEnd;
+        block.Text = null;
+        block.Inlines = inlines;
+        block.SetCurrentValue(SelectableTextBlock.SelectionStartProperty, start);
+        block.SetCurrentValue(SelectableTextBlock.SelectionEndProperty, end);
+    }
+
+    private void UpdateDeferredChunkText(MarkdownTextBlock block, int index)
+    {
+        if (deferredInlines?.ContainsKey(block) != true) return;
+        var first = index * LinesPerChunk;
+        block.Text = string.Join(Environment.NewLine, lineTexts.Skip(first).Take(LinesPerChunk));
     }
 
     /// <summary>Sets the text of one code line, creating the text block that holds it if needed.</summary>
     /// <remarks>Lines are expected in ascending order, which is how a block is built and grown.</remarks>
     internal void SetLine(int lineIndex, string text)
     {
-        var inlines = EnsureChunk(lineIndex / LinesPerChunk).Inlines!;
+        var chunkIndex = lineIndex / LinesPerChunk;
+        var chunk = EnsureChunk(chunkIndex);
+        var inlines = InlinesOf(chunk);
         var indexInChunk = lineIndex % LinesPerChunk;
         var offset = indexInChunk * 2;
 
@@ -313,8 +396,11 @@ public class CodeBlock : TemplatedControl
             inlines[offset] = new Run(text);
         }
 
+        var changed = deferredInlines?.ContainsKey(chunk) == true &&
+            (lineIndex >= lineTexts.Count || !string.Equals(lineTexts[lineIndex], text, StringComparison.Ordinal));
         while (lineTexts.Count <= lineIndex) lineTexts.Add(string.Empty);
         lineTexts[lineIndex] = text;
+        if (changed) UpdateDeferredChunkText(chunk, chunkIndex);
     }
 
     /// <summary>Drops every line at or past <paramref name="count"/>.</summary>
@@ -324,20 +410,26 @@ public class CodeBlock : TemplatedControl
         while (chunks.Count > neededChunks)
         {
             var block = chunks[^1];
-            if (block.Inlines is { } blockInlines) blockInlines.CollectionChanged -= HandleInlinesChanged;
+            if (InlinesOf(block) is { } inlines) inlines.CollectionChanged -= HandleInlinesChanged;
+            if (deferredInlines?.Remove(block) == true)
+                block.EffectiveViewportChanged -= OnDeferredChunkViewportChanged;
             linesPanel?.Children.Remove(block);
             chunks.RemoveAt(chunks.Count - 1);
         }
 
         if (chunks.Count > 0)
         {
-            var inlines = chunks[^1].Inlines!;
+            var inlines = InlinesOf(chunks[^1]);
             var linesInLast = count - ((chunks.Count - 1) * LinesPerChunk);
             var keep = Math.Max(0, (linesInLast * 2) - 1);
             while (inlines.Count > keep) inlines.RemoveAt(inlines.Count - 1);
         }
 
-        if (lineTexts.Count > count) lineTexts.RemoveRange(count, lineTexts.Count - count);
+        if (lineTexts.Count > count)
+        {
+            lineTexts.RemoveRange(count, lineTexts.Count - count);
+            if (chunks.Count > 0) UpdateDeferredChunkText(chunks[^1], chunks.Count - 1);
+        }
     }
 
     /// <summary>
@@ -439,18 +531,17 @@ public class CodeBlock : TemplatedControl
             _copyButtonClickedSubscription = null;
         }
 
-        linesPanel = e.NameScope.Find<Panel>(CodeLinesPanelName);
-        if (linesPanel is null)
-        {
-            throw new InvalidOperationException($"{CodeLinesPanelName} is not found in the template.");
-        }
+        var panel = e.NameScope.Find<Panel>(CodeLinesPanelName)
+            ?? throw new InvalidOperationException($"{CodeLinesPanelName} is not found in the template.");
+        if (!ReferenceEquals(linesPanel, panel)) linesPanel?.Children.Clear();
+        linesPanel = panel;
 
         // Any text block built before the template arrived joins it now, in order.
         linesPanel.Children.Clear();
-        foreach (var chunk in chunks)
+        for (var i = 0; i < chunks.Count; i++)
         {
-            chunk.SourceSpan = SourceSpan;
-            linesPanel.Children.Add(chunk);
+            chunks[i].SourceSpan = SourceSpan;
+            AttachChunk(i);
         }
 
         _scrollViewer = e.NameScope.Find<ScrollViewer>(ScrollViewerName);
@@ -473,7 +564,11 @@ public class CodeBlock : TemplatedControl
     {
         base.OnPropertyChanged(change);
 
-        if (change.Property == LanguageProperty)
+        if (change.Property == DeferOffscreenChunkStylingProperty && change.NewValue is false && deferredInlines is { Count: > 0 })
+        {
+            foreach (var chunk in deferredInlines.Keys.ToArray()) RestoreChunkStyling(chunk);
+        }
+        else if (change.Property == LanguageProperty)
         {
             if (AutoSyntaxHighlight) HighlightSyntax();
         }
@@ -489,7 +584,7 @@ public class CodeBlock : TemplatedControl
         {
             foreach (var chunk in chunks)
             {
-                if (chunk.Inlines is not { } chunkInlines) continue;
+                if (InlinesOf(chunk) is not { } chunkInlines) continue;
 
                 if (change.NewValue is true) chunkInlines.CollectionChanged += HandleInlinesChanged;
                 else chunkInlines.CollectionChanged -= HandleInlinesChanged;
@@ -535,6 +630,12 @@ public class CodeBlock : TemplatedControl
         finally
         {
             isApplyingSyntaxHighlighting = false;
+        }
+        if (deferredInlines is { Count: > 0 })
+        {
+            // A changed line or theme can introduce typography that the plain layout cannot match.
+            foreach (var chunk in deferredInlines.Where(pair => !CanDefer(pair.Value)).Select(pair => pair.Key).ToArray())
+                RestoreChunkStyling(chunk);
         }
     }
 
