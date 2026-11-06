@@ -1,10 +1,17 @@
+using System.Diagnostics;
 using System.Text;
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Controls.Documents;
+using Avalonia.Controls.Presenters;
+using Avalonia.Controls.Primitives;
+using Avalonia.Controls.Templates;
 using Avalonia.Headless;
+using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.LogicalTree;
 using Avalonia.Media;
+using Avalonia.Styling;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
 using Markdig;
@@ -130,6 +137,241 @@ public class RenderCostTests
 
         var lines = result.Code!.Split('\n');
         Assert.That(lines, Has.Length.EqualTo(count), "no line duplicated or lost at a boundary");
+    }
+
+    [TestCase(false)]
+    [TestCase(true)]
+    public async Task Offscreen_code_chunks_keep_the_extent_and_style_the_tail_on_scroll(bool wrap)
+    {
+        await session.Dispatch(() =>
+        {
+            const int iterations = 9;
+            var text = LongCode();
+            double eagerHeight = 0;
+            foreach (var deferred in new[] { false, true })
+            {
+                var firstLayout = new List<double>();
+                var allocated = new List<long>();
+                var styled = 0;
+                for (var i = 0; i < iterations; i++)
+                {
+                    var code = new CodeBlock
+                    {
+                        Language = "csharp", Code = text, IsCodeWrapped = wrap, DeferOffscreenChunkStyling = deferred,
+                    };
+                    var window = CodeScrollHost(code, wrap ? 300 : 496, out var scroll);
+                    try
+                    {
+                        var bytes = GC.GetAllocatedBytesForCurrentThread();
+                        var start = Stopwatch.GetTimestamp();
+                        window.Show();
+                        PumpCodeHost(window);
+                        if (i > 0)
+                        {
+                            firstLayout.Add(Stopwatch.GetElapsedTime(start).TotalMilliseconds);
+                            allocated.Add(GC.GetAllocatedBytesForCurrentThread() - bytes);
+                        }
+                        styled = code.CodeTextBlocks.Count(block => block.Inlines is not null);
+                        Assert.That(scroll.Extent.Height, Is.GreaterThan(scroll.Viewport.Height));
+                        if (!deferred)
+                            eagerHeight = scroll.Extent.Height;
+                        else
+                        {
+                            Assert.That(styled, Is.InRange(2, code.CodeTextBlocks.Count - 1), "only the visible range attaches styled inlines");
+                            Assert.That(scroll.Extent.Height, Is.EqualTo(eagerHeight).Within(1), "plain chunks reserve the same height");
+                            Assert.That(code.Code, Is.EqualTo(text.Replace("\n", Environment.NewLine)), "copy includes the unvisited lines");
+                            Assert.That(code.CodeTextBlocks[^1].Inlines, Is.Null);
+
+                            scroll.ScrollToEnd();
+                            PumpCodeHost(window);
+
+                            Assert.That(code.CodeTextBlocks[^1].Inlines, Is.Not.Null, "the tail styles on demand");
+                            Assert.That(scroll.Extent.Height, Is.EqualTo(eagerHeight).Within(1));
+                        }
+                    }
+                    finally { window.Close(); }
+                }
+
+                firstLayout.Sort();
+                allocated.Sort();
+                TestContext.Progress.WriteLine(
+                    $"Wrap={wrap}, defer={deferred}: styled={styled}, extent={eagerHeight:F1}, " +
+                    $"median layout={firstLayout[firstLayout.Count / 2]:F1}ms, allocated={allocated[allocated.Count / 2] / 1024}KiB");
+            }
+        }, CancellationToken.None);
+    }
+
+    [Test]
+    public async Task Search_and_selection_include_offscreen_code_before_and_after_reveal()
+    {
+        await session.Dispatch(() =>
+        {
+            var text = LongCode();
+            var renderer = new MarkdownRenderer
+            {
+                DocumentUpdate = new MarkdownDocumentUpdate.Full(Markdown.Parse(
+                    "Start of document.\n\n```csharp\n" + text + "\n```\n\nEnd of document.",
+                    MarkdownUpdateProducer.DefaultPipeline)),
+            };
+            var window = CodeScrollHost(renderer, 300, out var scroll);
+            var deferredStyle = new Style(selector => selector.OfType<CodeBlock>());
+            deferredStyle.Setters.Add(new Setter(CodeBlock.DeferOffscreenChunkStylingProperty, true));
+            window.Styles.Add(deferredStyle);
+            try
+            {
+                window.Show();
+                PumpCodeHost(window);
+                var code = renderer.GetVisualDescendants().OfType<CodeBlock>().Single();
+                var tail = code.CodeTextBlocks[^1];
+                var middle = code.CodeTextBlocks[24 / CodeBlock.LinesPerChunk];
+                Assert.That(code.IsCodeWrapped, Is.True);
+                Assert.That(tail.Inlines, Is.Null);
+
+                Assert.That(renderer.ApplyTextSearch("result24").Single().Block, Is.SameAs(middle));
+                text = text.Replace("result24", "temporaryValue24", StringComparison.Ordinal);
+                code.Code = text;
+                Assert.That(renderer.ApplyTextSearch("temporaryValue24").Single().Block, Is.SameAs(middle));
+                text = text.Replace("temporaryValue24", "updatedValue24", StringComparison.Ordinal);
+                code.Code = text;
+                Assert.That(renderer.ApplyTextSearch("temporaryValue24"), Is.Empty);
+                PumpCodeHost(window);
+                Assert.That(middle.Inlines, Is.Null);
+                Assert.That(renderer.ApplyTextSearch("updatedValue24").Single().Block, Is.SameAs(middle));
+
+                var match = renderer.ApplyTextSearch("result57").Single();
+                Assert.That(match.Block, Is.SameAs(tail));
+                Assert.That(tail.Inlines, Is.Null, "search leaves offscreen styling deferred");
+                renderer.SelectAll();
+                var expected = "Start of document." + Environment.NewLine + text.Replace("\n", Environment.NewLine)
+                    + Environment.NewLine + "End of document.";
+                Assert.That(renderer.SelectedText, Is.EqualTo(expected));
+                Assert.That(tail.Inlines, Is.Null, "selection leaves offscreen styling deferred");
+
+                // The renderer suppresses child BringIntoView events so a focus change cannot scroll
+                // its host. A search navigator can still use the match's real layout coordinates.
+                var matchTop = match.Block.TranslatePoint(default, renderer);
+                Assert.That(matchTop, Is.Not.Null);
+                scroll.Offset = new Vector(0, matchTop!.Value.Y);
+                PumpCodeHost(window);
+                Assert.That(scroll.Offset.Y, Is.GreaterThan(0));
+                Assert.That(tail.Inlines, Is.Not.Null);
+                Assert.That(renderer.TextSearchMatches.Single().Block, Is.SameAs(tail));
+                Assert.That(tail.Highlights.TryGetValue(MarkdownRenderer.DefaultTextSearchHighlightName, out _), Is.True);
+                Assert.That(renderer.SelectedText, Is.EqualTo(expected), "styling keeps the original selection and reading order");
+                renderer.ClearSelection();
+                Assert.That(renderer.SelectedText, Is.Empty);
+
+                // Jump the viewport mid-drag. The selection range still includes chunks the drag
+                // never scrolled over, and those chunks can keep their inline styling deferred.
+                scroll.Offset = default;
+                PumpCodeHost(window);
+                var start = PointAt(code.CodeTextBlocks[0], 0);
+                window.MouseDown(start, MouseButton.Left);
+                scroll.Offset = new Vector(0, matchTop.Value.Y);
+                PumpCodeHost(window);
+                var end = PointAt(tail, tail.LayoutText.Length - 1);
+                window.MouseMove(end);
+                window.MouseUp(end, MouseButton.Left);
+                Assert.That(renderer.SelectedText, Does.Contain("updatedValue24"));
+                Assert.That(middle.Inlines, Is.Null);
+
+                Point PointAt(MarkdownTextBlock block, int position)
+                {
+                    var rect = block.TextLayout.HitTestTextPosition(position);
+                    return block.TranslatePoint(new Point(rect.X + 1, rect.Center.Y), window)!.Value;
+                }
+            }
+            finally
+            {
+                window.Close();
+            }
+        }, CancellationToken.None);
+    }
+
+    [Test]
+    public async Task Code_added_after_the_template_is_applied_can_defer_its_offscreen_chunks()
+    {
+        await session.Dispatch(() =>
+        {
+            var code = new CodeBlock { Language = "csharp", DeferOffscreenChunkStyling = true };
+            var window = CodeScrollHost(code, 300, out var scroll);
+            try
+            {
+                window.Show();
+                PumpCodeHost(window);
+                Assert.That(code.CodeTextBlocks, Is.Empty);
+
+                var text = LongCode();
+                code.Code = text;
+                PumpCodeHost(window);
+                Assert.That(code.CodeTextBlocks[^1].Inlines, Is.Null);
+
+                // Add a second batch of chunks after the first block has laid out.
+                text += "\n" + string.Join("\n", Enumerable.Repeat("    var addedLater = 1;", CodeBlock.LinesPerChunk));
+                code.Code = text;
+                PumpCodeHost(window);
+                var tail = code.CodeTextBlocks[^1];
+                Assert.That(tail.Inlines, Is.Null);
+                Assert.That(tail.LayoutText, Does.Contain("addedLater"));
+                Assert.That(code.Code, Is.EqualTo(text.Replace("\n", Environment.NewLine)));
+
+                scroll.ScrollToEnd();
+                PumpCodeHost(window);
+                Assert.That(tail.Inlines, Is.Not.Null);
+            }
+            finally { window.Close(); }
+        }, CancellationToken.None);
+    }
+
+    [Test]
+    public async Task Offscreen_inline_font_overrides_keep_their_full_wrapped_layout()
+    {
+        await session.Dispatch(() =>
+        {
+            var code = new CodeBlock { Code = LongCode(), DeferOffscreenChunkStyling = true };
+            var tail = code.CodeTextBlocks[^1];
+            ((Run)tail.Inlines![0]).FontSize = 24;
+            var window = CodeScrollHost(code, 300, out _);
+            try
+            {
+                window.Show();
+                PumpCodeHost(window);
+                Assert.That(code.CodeTextBlocks[^2].Inlines, Is.Null);
+                Assert.That(tail.Inlines, Is.Not.Null, "plain layout would lose the overridden line metrics");
+                code.DeferOffscreenChunkStyling = false;
+                Assert.That(code.CodeTextBlocks.All(block => block.Inlines is not null), Is.True);
+            }
+            finally { window.Close(); }
+        }, CancellationToken.None);
+    }
+
+    private static string LongCode() => string.Join("\n", Enumerable.Range(0, 58).Select(line =>
+        $"    var result{line} = values.Where(value => value.Id == {line}).ToArray();"));
+
+    private static Window CodeScrollHost(Control content, double width, out ScrollViewer scroll)
+    {
+        scroll = new ScrollViewer { Content = content, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+        var window = new Window { Width = width, Height = 350, Content = scroll };
+        var style = new Style(selector => selector.OfType<ScrollViewer>());
+        style.Setters.Add(new Setter(ScrollViewer.TemplateProperty,
+            new FuncControlTemplate<ScrollViewer>((owner, scope) =>
+            {
+                var presenter = new ScrollContentPresenter
+                {
+                    Name = "PART_ContentPresenter",
+                    [!ContentPresenter.ContentProperty] = owner[!ContentControl.ContentProperty],
+                };
+                scope.Register(presenter.Name, presenter);
+                return presenter;
+            })));
+        window.Styles.Add(style);
+        return window;
+    }
+
+    private static void PumpCodeHost(Window window)
+    {
+        Dispatcher.UIThread.RunJobs();
+        window.UpdateLayout();
     }
 
     [Test]

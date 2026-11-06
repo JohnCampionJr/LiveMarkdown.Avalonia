@@ -347,6 +347,9 @@ public partial class MarkdownTextBlock : SelectableTextBlock
     {
         base.OnPropertyChanged(change);
 
+        if (change.Property == TextProperty || change.Property == InlinesProperty)
+            _layoutText = null;
+
         if (change.Property == IsVisibleProperty)
         {
             InvalidateRendererTextState(this);
