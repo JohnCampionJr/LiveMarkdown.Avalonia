@@ -299,10 +299,11 @@ public class CodeBlock : TemplatedControl
     {
         if (linesPanel is not { } panel) return;
         var block = chunks[index];
-        if (DeferOffscreenChunkStyling && index > 0 && block.Inlines is { Count: > 0 } inlines && CanDefer(inlines))
+        if (DeferOffscreenChunkStyling && index > 0 && block.Inlines is { } inlines && CanDefer(inlines))
         {
             // Keep the same searchable, selectable text block in the tree. Its plain text can wrap
             // and keep its scroll coordinates before its styled inline children are attached.
+            // A streaming chunk can arrive empty here. SetLine keeps its plain text up to date.
             var text = inlines.LayoutText;
             (deferredInlines ??= new()).Add(block, inlines);
             block.Inlines = null;

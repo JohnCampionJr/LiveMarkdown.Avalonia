@@ -289,6 +289,41 @@ public class RenderCostTests
     }
 
     [Test]
+    public async Task Code_added_after_the_template_is_applied_can_defer_its_offscreen_chunks()
+    {
+        await session.Dispatch(() =>
+        {
+            var code = new CodeBlock { Language = "csharp", DeferOffscreenChunkStyling = true };
+            var window = CodeScrollHost(code, 300, out var scroll);
+            try
+            {
+                window.Show();
+                PumpCodeHost(window);
+                Assert.That(code.CodeTextBlocks, Is.Empty);
+
+                var text = LongCode();
+                code.Code = text;
+                PumpCodeHost(window);
+                Assert.That(code.CodeTextBlocks[^1].Inlines, Is.Null);
+
+                // Add a second batch of chunks after the first block has laid out.
+                text += "\n" + string.Join("\n", Enumerable.Repeat("    var addedLater = 1;", CodeBlock.LinesPerChunk));
+                code.Code = text;
+                PumpCodeHost(window);
+                var tail = code.CodeTextBlocks[^1];
+                Assert.That(tail.Inlines, Is.Null);
+                Assert.That(tail.LayoutText, Does.Contain("addedLater"));
+                Assert.That(code.Code, Is.EqualTo(text.Replace("\n", Environment.NewLine)));
+
+                scroll.ScrollToEnd();
+                PumpCodeHost(window);
+                Assert.That(tail.Inlines, Is.Not.Null);
+            }
+            finally { window.Close(); }
+        }, CancellationToken.None);
+    }
+
+    [Test]
     public async Task Offscreen_inline_font_overrides_keep_their_full_wrapped_layout()
     {
         await session.Dispatch(() =>
