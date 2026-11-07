@@ -622,6 +622,8 @@ public class CodeBlock : TemplatedControl
         if (isApplyingSyntaxHighlighting) return;
         if (string.IsNullOrWhiteSpace(Language) || LineCount == 0) return;
 
+        using var phase = MarkdownRenderDiagnostics.Measure(MarkdownRenderPhase.CodeStyling);
+        if (MarkdownRenderDiagnostics.Current is { } metrics) metrics.StylingCalls++;
         SyntaxHighlightPassCount++;
         isApplyingSyntaxHighlighting = true;
         try

@@ -36,6 +36,8 @@ public partial class MarkdownRenderer
             get => children[index];
             set
             {
+                using var phase = MarkdownRenderDiagnostics.Measure(MarkdownRenderPhase.TreeChanges);
+                if (MarkdownRenderDiagnostics.Current is { } metrics) metrics.CollectionChanges++;
                 target[index] = value.Inline;
                 children[index] = value;
             }
@@ -49,6 +51,8 @@ public partial class MarkdownRenderer
         /// <param name="node">The node to add.</param>
         public void Add(InlineNode node)
         {
+            using var phase = MarkdownRenderDiagnostics.Measure(MarkdownRenderPhase.TreeChanges);
+            if (MarkdownRenderDiagnostics.Current is { } metrics) metrics.CollectionChanges++;
             children.Add(node);
             target.Add(node.Inline);
             Debug.Assert(children.Count == target.Count, "Children count mismatch");
@@ -60,6 +64,8 @@ public partial class MarkdownRenderer
         /// <param name="index">The zero-based inline index.</param>
         public void RemoveAt(int index)
         {
+            using var phase = MarkdownRenderDiagnostics.Measure(MarkdownRenderPhase.TreeChanges);
+            if (MarkdownRenderDiagnostics.Current is { } metrics) metrics.CollectionChanges++;
             var node = children[index];
             target.Remove(node.Inline);
             children.RemoveAt(index);
@@ -122,6 +128,8 @@ public partial class MarkdownRenderer
             get => children[index];
             set
             {
+                using var phase = MarkdownRenderDiagnostics.Measure(MarkdownRenderPhase.TreeChanges);
+                if (MarkdownRenderDiagnostics.Current is { } metrics) metrics.CollectionChanges++;
                 target[index] = value.Control;
                 children[index] = value;
             }
@@ -135,6 +143,8 @@ public partial class MarkdownRenderer
         /// <param name="node">The node to add.</param>
         public void Add(BlockNode node)
         {
+            using var phase = MarkdownRenderDiagnostics.Measure(MarkdownRenderPhase.TreeChanges);
+            if (MarkdownRenderDiagnostics.Current is { } metrics) metrics.CollectionChanges++;
             children.Add(node);
             target.Add(node.Control);
             Debug.Assert(children.Count == target.Count, "Children count mismatch");
@@ -147,6 +157,8 @@ public partial class MarkdownRenderer
         /// <param name="control"></param>
         public void Add(Control control)
         {
+            using var phase = MarkdownRenderDiagnostics.Measure(MarkdownRenderPhase.TreeChanges);
+            if (MarkdownRenderDiagnostics.Current is { } metrics) metrics.CollectionChanges++;
             children.Add(new MockBlockNode(control));
             target.Add(control);
         }
@@ -158,6 +170,8 @@ public partial class MarkdownRenderer
         /// <param name="control">The replacement control.</param>
         public void SetControlAt(int index, Control control)
         {
+            using var phase = MarkdownRenderDiagnostics.Measure(MarkdownRenderPhase.TreeChanges);
+            if (MarkdownRenderDiagnostics.Current is { } metrics) metrics.CollectionChanges++;
             target[index] = control;
             if (children[index] is MockBlockNode mockBlockNode) mockBlockNode.SetControl(control);
             else children[index] = new MockBlockNode(control);
@@ -169,6 +183,8 @@ public partial class MarkdownRenderer
         /// <param name="index">The zero-based block index.</param>
         public void RemoveAt(int index)
         {
+            using var phase = MarkdownRenderDiagnostics.Measure(MarkdownRenderPhase.TreeChanges);
+            if (MarkdownRenderDiagnostics.Current is { } metrics) metrics.CollectionChanges++;
             var node = children[index];
             target.Remove(node.Control);
             children.RemoveAt(index);
@@ -180,6 +196,8 @@ public partial class MarkdownRenderer
         /// </summary>
         public void Clear()
         {
+            using var phase = MarkdownRenderDiagnostics.Measure(MarkdownRenderPhase.TreeChanges);
+            if (MarkdownRenderDiagnostics.Current is { } metrics) metrics.CollectionChanges++;
             target.Clear();
             children.Clear();
         }

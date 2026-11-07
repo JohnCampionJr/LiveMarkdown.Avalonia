@@ -47,13 +47,18 @@ public abstract class BlockNode : MarkdownNode
         var type = block.GetType();
 
         // First try to find an exact match, then try to find a compatible type
-        var node = NodeFactories
-                .OfType<IMarkdownNodeFactory<BlockNode>>()
-                .Where(f => f.MarkdownType.IsAssignableFrom(type))
-                .OrderBy(f => f)
-                .Select(f => f.CreateNode())
-                .FirstOrDefault()
-            ?? new NotImplementedBlockNode(block.GetType());
+        BlockNode node;
+        using (MarkdownRenderDiagnostics.Measure(MarkdownRenderPhase.Construction))
+        {
+            node = NodeFactories
+                    .OfType<IMarkdownNodeFactory<BlockNode>>()
+                    .Where(f => f.MarkdownType.IsAssignableFrom(type))
+                    .OrderBy(f => f)
+                    .Select(f => f.CreateNode())
+                    .FirstOrDefault()
+                ?? new NotImplementedBlockNode(block.GetType());
+            if (MarkdownRenderDiagnostics.Current is { } metrics) metrics.ConstructedNodes++;
+        }
 
         node.Update(documentNode, block, change, cancellationToken);
         return node;

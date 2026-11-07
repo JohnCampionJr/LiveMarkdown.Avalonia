@@ -106,10 +106,19 @@ public abstract class MarkdownNode
     {
         if (!IsDirty(markdownObject, change))
         {
+            if (MarkdownRenderDiagnostics.Current is { } skipped) skipped.SkippedNodes++;
             // No need to update, the change does not affect this node
             return null;
         }
 
+        var metrics = MarkdownRenderDiagnostics.Current;
+        if (metrics is not null)
+        {
+            if (this is InlineNode) metrics.InlineUpdates++;
+            else metrics.BlockUpdates++;
+        }
+        using var phase = MarkdownRenderDiagnostics.Measure(this is CodeBlockNode ? MarkdownRenderPhase.Code
+            : this is InlineNode ? MarkdownRenderPhase.Inlines : MarkdownRenderPhase.Blocks);
         var result = UpdateCore(documentNode, markdownObject, change, cancellationToken);
         span = markdownObject.Span;
 
