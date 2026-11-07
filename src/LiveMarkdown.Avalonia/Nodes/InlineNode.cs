@@ -41,13 +41,18 @@ public abstract class InlineNode : MarkdownNode
         var type = inline.GetType();
 
         // First try to find an exact match, then try to find a compatible type
-        var node = NodeFactories
-                .OfType<IMarkdownNodeFactory<InlineNode>>()
-                .Where(f => f.MarkdownType.IsAssignableFrom(type))
-                .OrderBy(f => f)
-                .Select(f => f.CreateNode())
-                .FirstOrDefault()
-            ?? new NotImplementedInlineNode(inline.GetType());
+        InlineNode node;
+        using (MarkdownRenderDiagnostics.Measure(MarkdownRenderPhase.Construction))
+        {
+            node = NodeFactories
+                    .OfType<IMarkdownNodeFactory<InlineNode>>()
+                    .Where(f => f.MarkdownType.IsAssignableFrom(type))
+                    .OrderBy(f => f)
+                    .Select(f => f.CreateNode())
+                    .FirstOrDefault()
+                ?? new NotImplementedInlineNode(inline.GetType());
+            if (MarkdownRenderDiagnostics.Current is { } metrics) metrics.ConstructedNodes++;
+        }
 
         node.Update(documentNode, inline, change, cancellationToken);
         return node;

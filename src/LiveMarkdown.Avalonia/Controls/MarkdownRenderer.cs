@@ -215,6 +215,10 @@ public partial class MarkdownRenderer : Control
         var previous = documentUpdate;
         if (!SetAndRaise(DocumentUpdateProperty, ref documentUpdate, value)) return;
 
+        using var capture = MarkdownRenderDiagnostics.Begin(
+            value is null ? "clear" : value is MarkdownDocumentUpdate.Incremental delta && previous is not null && delta.Follows(previous)
+                ? "incremental" : "full", value?.Document.GetLength() ?? 0);
+
         // Build detached renderers too, so attaching or realizing one never exposes an
         // intermediate empty tree before its first measure.
         if (value != null)
@@ -263,5 +267,6 @@ public partial class MarkdownRenderer : Control
         }
 
         InvalidateMeasure();
+        capture.Complete();
     }
 }
