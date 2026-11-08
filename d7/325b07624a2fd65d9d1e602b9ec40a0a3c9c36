@@ -1,0 +1,45 @@
+src/LiveMarkdown.Avalonia/Controls/MarkdownTextBlock.CodeInlines.cs
+  s_39a534ffa60717::t_2416bf0c445b26 75-76,78
+  s_39a534ffa60717::t_4f24617619d823 23,25-29,31-36,38-39,42-44,46-48,73,95,97
+  s_39a534ffa60717::t_86bdd31a50247b 24,30,37,40-41,45
+src/LiveMarkdown.Avalonia/Controls/MarkdownTextBlock.Caches.cs
+  s_39a534ffa60717::t_5308d658c1535d 9-10,13-14,27,42-43,45,49-50,55-65,68-76,79-80,82-84,89-90,92-94,99-100,154-162,164,167-170,181-182,200
+  s_39a534ffa60717::t_3301ca0653befc 1-8,11,15-24,30-35,41,44,46-48,95-98,101-102,105,143-153,163,165-166,171-180,183-199,203-241
+  s_39a534ffa60717::t_8c172378c70bfb 12,28-29,36-40,77-78,81,85-88,91,201-202
+  s_39a534ffa60717::t_86bdd31a50247b 66-67
+  s_39a534ffa60717::t_660d73a753257c 51-54,103-104,106-142
+  s_39a534ffa60717::t_f908fde98bf1d5 25-26
+src/LiveMarkdown.Avalonia/Controls/MarkdownTextBlock.cs
+  s_39a534ffa60717::t_919f4b1ac7a6e3 304-305
+  s_39a534ffa60717::t_660d73a753257c 137-138,140-142,1051-1061
+  s_39a534ffa60717::t_3a9fdee943a4ca 1418,1741,1787
+  s_39a534ffa60717::t_2416bf0c445b26 1073-1074
+  s_39a534ffa60717::t_8c252186f82720 150,170,341-343,378-380,390-393,629,2183,2250-2251,2257
+docs/performance-round-2.md
+  s_39a534ffa60717::t_ed6d5f2709a5e0 9-20,23-28,32-42
+  s_39a534ffa60717::t_f535ff5eeabc02 21-22,43-45
+  s_39a534ffa60717::t_94fac8d83a95ad 29-31
+  s_39a534ffa60717::t_3301ca0653befc 1-8
+tests/LiveMarkdown.Avalonia.Tests/InlineHitTestBenchmark.cs
+  s_39a534ffa60717::t_c4f3b51cfa4b37 1-57
+tests/LiveMarkdown.Avalonia.Tests/RenderingCacheTests.cs
+  s_39a534ffa60717::t_b408177886c755 7,133-182
+  s_39a534ffa60717::t_43adeaf61018dc 185-207
+  s_39a534ffa60717::t_f908fde98bf1d5 1-6,8-132,183-184,208-232
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "d7325b07624a2fd65d9d1e602b9ec40a0a3c9c36",
+  "prompts": {},
+  "sessions": {
+    "s_39a534ffa60717": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19231-69fb-79d1-8545-fbf1d4a89679",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "John Campion Jr <john@brightshore.io>"
+    }
+  }
+}
