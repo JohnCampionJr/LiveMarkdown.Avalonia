@@ -33,6 +33,7 @@ public class RoundThreeDiskCacheTests
     [TearDown]
     public void TearDown()
     {
+        FileBasedAsyncImageLoaderCache.BeforeMissingEntryAccounting = null;
         FileBasedAsyncImageLoaderCache.CacheDirectory = oldDirectory;
         FileBasedAsyncImageLoaderCache.MaxCacheSizeBytes = oldSize;
         FileBasedAsyncImageLoaderCache.MaxEntrySizeBytes = oldEntrySize;
@@ -215,6 +216,79 @@ public class RoundThreeDiskCacheTests
         });
         await cache.SetAsync(UriFor(1), source, Metadata(1), CancellationToken.None);
         Assert.That(await TotalBytes([1]), Is.EqualTo(16));
+    }
+
+    [Test]
+    public async Task A_paused_miss_cannot_forget_a_concurrent_commit_and_exceed_the_cap()
+    {
+        FileBasedAsyncImageLoaderCache.MaxCacheSizeBytes = 8;
+        var missed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var resumeMiss = new ManualResetEventSlim();
+        FileBasedAsyncImageLoaderCache.BeforeMissingEntryAccounting = path =>
+        {
+            if (path != EntryPath(1)) return;
+            FileBasedAsyncImageLoaderCache.BeforeMissingEntryAccounting = null;
+            missed.TrySetResult();
+            resumeMiss.Wait();
+        };
+        var reader = Task.Run(() => cache.GetAsync(UriFor(1), CancellationToken.None));
+        try
+        {
+            await missed.Task;
+            await Store(1, 8);
+        }
+        finally { resumeMiss.Set(); }
+        await using var missing = await reader;
+        Assert.That(missing, Is.Null);
+        await Store(2, 8);
+        Assert.That(await TotalBytes([1, 2]), Is.EqualTo(8));
+        Assert.That(FileBasedAsyncImageLoaderCache.ActiveEntryLockCount, Is.Zero);
+    }
+
+    [TestCase(false)]
+    [TestCase(true)]
+    public async Task Bulk_eviction_sorts_one_batch_and_preserves_expiration_then_lru_order(bool reduceBudget)
+    {
+        FileBasedAsyncImageLoaderCache.MaxCacheSizeBytes = 48 * 8;
+        for (var i = 0; i < 48; i++)
+        {
+            // The newest entries are expired, so they must go before older live entries.
+            var metadata = Metadata(i);
+            metadata.ExpiresAt = clock.GetUtcNow().AddDays(i < 32 ? 1 : -1);
+            using var source = new MemoryStream(new byte[8]);
+            await cache.SetAsync(UriFor(i), source, metadata, CancellationToken.None);
+            clock.Advance(TimeSpan.FromSeconds(1));
+        }
+        var batches = FileBasedAsyncImageLoaderCache.EvictionBatchCount;
+        var candidates = FileBasedAsyncImageLoaderCache.EvictionCandidateCount;
+        if (reduceBudget)
+        {
+            FileBasedAsyncImageLoaderCache.MaxCacheSizeBytes = 4 * 8;
+            // Touch triggers reconciliation for the changed budget without adding an entry.
+            await cache.TouchAsync(UriFor(100), Metadata(100), CancellationToken.None);
+        }
+        else await Store(99, 44 * 8);
+        Assert.That(FileBasedAsyncImageLoaderCache.EvictionBatchCount - batches, Is.EqualTo(1));
+        Assert.That(FileBasedAsyncImageLoaderCache.EvictionCandidateCount - candidates, Is.EqualTo(reduceBudget ? 48 : 49));
+        for (var i = 32; i < 48; i++) Assert.That(File.Exists(EntryPath(i)), Is.False, $"expired entry {i}");
+        // Reconciliation uses filesystem access times; only local accounting uses the injected clock.
+        if (!reduceBudget)
+            for (var i = 0; i < 32; i++)
+                Assert.That(File.Exists(EntryPath(i)), Is.EqualTo(i >= 28), $"live entry {i}");
+        Assert.That(await TotalBytes(Enumerable.Range(0, 48)), Is.EqualTo(32));
+        Assert.That(await TotalBytes([99]), Is.EqualTo(reduceBudget ? 0 : 44 * 8));
+        Assert.That(FileBasedAsyncImageLoaderCache.ActiveEntryLockCount, Is.Zero);
+    }
+
+    [Test]
+    public async Task Equal_access_times_preserve_the_original_eviction_order()
+    {
+        FileBasedAsyncImageLoaderCache.MaxCacheSizeBytes = 16 * 8;
+        for (var i = 0; i < 16; i++) await Store(i, 8);
+        await Store(99, 8 * 8);
+        for (var i = 0; i < 16; i++)
+            Assert.That(File.Exists(EntryPath(i)), Is.EqualTo(i >= 8), $"entry {i}");
+        Assert.That(await TotalBytes(Enumerable.Range(0, 16).Append(99)), Is.EqualTo(16 * 8));
     }
 
     private string NewDirectory()

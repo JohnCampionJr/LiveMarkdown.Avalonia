@@ -10,7 +10,7 @@ Date: 2026-11-07. All eight findings are implemented.
 | R3-02 | Done | `CodeBlockNode` caches source positions, uses an append boundary or bounded search, and normalizes positions from parsed tails. | `RoundThreeStreamingTests`: 32/512-line counts, unterminated edits, spliced fences, blank lines, truncation, indentation, cancellation |
 | R3-03 | Done | Projection reuse requires matching version, ordered block identities, spans and complete text identities. Clear/rebind releases the snapshot. | `RoundThreeLayoutTests`: no rebuild/notification on no-op; mutable buffers, embedded text, visibility/order, spans, versions |
 | R3-04 | Done | `MarkdownListGrid` builds row offsets during measurement, reuses them during arrange, and observes/removes placement handlers. | `RoundThreeLayoutTests`: sparse order, repeated arrange, spacing/placement, removal/clear |
-| R3-05 | Done | Disk mutations update byte accounting; scheduled/config-change reconciliation replaces per-write directory scans. | `RoundThreeDiskCacheTests`: scan counts, concurrent cap, replace/remove/no-store, injected-clock LRU, external writes, config/clear, old streaming transaction |
+| R3-05 | Done | Disk mutations update byte accounting; scheduled/config-change reconciliation replaces per-write directory scans. | `RoundThreeDiskCacheTests`: scan counts, concurrent cap, replace/remove/no-store, injected-clock LRU, external writes, config/clear, old streaming transaction, concurrent miss/commit, bulk eviction and equal-time order |
 | R3-06 | Done | Waiter-aware reservations retire entry locks only after the last holder/waiter leaves. | `RoundThreeDiskCacheTests`: cancellation, queued holders, failure cleanup, zero retained locks |
 | R3-07 | Done | `ImageLoadCoordinator` shares cold bytes/cache fill by URI + handler/cache identity; consumers retain separate streams, decodes and cancellation. Local/resource/raw/data handlers decode directly. | `RoundThreeImageLoadTests`: fetch/cache counts, bytes/images, peer/all cancellation, retry, scope, fresh/stale cache paths, original FileStream |
 | R3-08 | Done | Owned undisplayed decoded results are disposed exactly once. Built-in bitmaps opt in; custom decoders default to borrowed results. | `RoundThreeImageLoadTests`: owned/borrowed stale completion, cache failure, ownership transfer |
@@ -28,6 +28,19 @@ Date: 2026-11-07. All eight findings are implemented.
 - Release .NET 8 build and all three updated explicit audit cases passed. Five deterministic
   benchmark-comparator tests passed; the seven-workload suite passed on both revisions twice.
 - No full local suite was run. Focused results: `focused-regressions.log` in the artifact directory below.
+
+## PR #5 review follow-up
+
+- [x] Keep the missing-file existence check and accounting removal under `AccountingSync`.
+  A deterministic barrier pauses a miss while a write commits; the old check ordering leaves
+  16 bytes under an 8-byte cap, while the corrected ordering retains exactly 8 bytes.
+- [x] Snapshot and stably sort eviction candidates once per batch, expired entries first and
+  then access order. Budget reduction and large insertion each evict 44 entries from one
+  48/49-candidate batch, preserving equal-time insertion order. Reads during a batch affect
+  the next batch's ordering; local writes remain serialized by `CleanupGate`.
+- Four added deterministic cases bring the round's new regression count to 49. Review validation:
+  40 disk/cache tests passed; the pre-fix race ordering failed as expected. The original
+  214-test run and benchmark measurements above/below describe the initial PR revision.
 
 ## Benchmarks
 

@@ -39,6 +39,9 @@ public class FileBasedAsyncImageLoaderCache : AsyncImageLoaderCache
     private static AccountingSettings? _accountingSettings;
     internal static TimeProvider Clock { get; set; } = TimeProvider.System;
     internal static int DirectoryScanCount { get; private set; }
+    internal static int EvictionBatchCount { get; private set; }
+    internal static long EvictionCandidateCount { get; private set; }
+    internal static Action<string>? BeforeMissingEntryAccounting { get; set; }
     internal static int ActiveEntryLockCount => EntryLocks.Count;
     private static readonly SemaphoreSlim CleanupGate = new(1, 1);
     private static DateTimeOffset _lastCleanup = DateTimeOffset.MinValue;
@@ -577,10 +580,13 @@ public class FileBasedAsyncImageLoaderCache : AsyncImageLoaderCache
 
     private static void ForgetKnownEntryIfRemoved(string path)
     {
-        if (File.Exists(path)) return;
         var key = Path.GetFullPath(path);
+        BeforeMissingEntryAccounting?.Invoke(path);
         lock (AccountingSync)
         {
+            // A miss may have been observed before a concurrent commit. Test existence
+            // under the same lock as RecordKnownEntry so it cannot erase that new record.
+            if (File.Exists(path)) return;
             if (_knownEntries.Remove(key, out var old)) _knownBodyBytes -= old.Length;
         }
     }
@@ -588,24 +594,28 @@ public class FileBasedAsyncImageLoaderCache : AsyncImageLoaderCache
     private static async Task EvictKnownEntriesAsync(CancellationToken cancellationToken)
     {
         if (MaxCacheSizeBytes <= 0) return;
-        while (true)
+        cancellationToken.ThrowIfCancellationRequested();
+        CleanupEntry[] candidates;
+        lock (AccountingSync)
+        {
+            if (_knownBodyBytes <= MaxCacheSizeBytes) return;
+            candidates = _knownEntries.Values.ToArray();
+            EvictionCandidateCount += candidates.Length;
+            EvictionBatchCount++;
+        }
+        // Mutations remain serialized by CleanupGate. Snapshot access order once for
+        // this batch instead of rescanning every remaining entry for every victim.
+        var now = Clock.GetUtcNow();
+        // Stable ordering also preserves insertion order for equal access timestamps.
+        foreach (var candidate in candidates
+            .OrderByDescending(entry => entry.ExpiresAt is { } expires && expires <= now)
+            .ThenBy(entry => entry.LastAccessedAt))
         {
             cancellationToken.ThrowIfCancellationRequested();
-            CleanupEntry? oldest = null;
-            var now = Clock.GetUtcNow();
             lock (AccountingSync)
             {
                 if (_knownBodyBytes <= MaxCacheSizeBytes) return;
-                foreach (var entry in _knownEntries.Values)
-                {
-                    if (oldest is not { } current) { oldest = entry; continue; }
-                    var expired = entry.ExpiresAt is { } expires && expires <= now;
-                    var currentExpired = current.ExpiresAt is { } currentExpires && currentExpires <= now;
-                    if ((expired && !currentExpired) ||
-                        (expired == currentExpired && entry.LastAccessedAt < current.LastAccessedAt)) oldest = entry;
-                }
             }
-            if (oldest is not { } candidate) return;
             var paths = CreatePathsFromEntryPath(candidate.EntryPath);
             await using var entryLock = await AcquireEntryLockAsync(paths, cancellationToken);
             DeleteIfExists(candidate.EntryPath);
