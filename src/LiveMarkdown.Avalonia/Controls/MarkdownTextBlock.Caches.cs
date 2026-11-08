@@ -93,8 +93,11 @@ public partial class MarkdownTextBlock
         }
     }
 
-    private void InvalidateInlineContent()
+    internal event Action? InlineContentInvalidated;
+
+    private void InvalidateInlineContent(bool notifyMutation = true)
     {
+        ReleaseSpareLayout();
         _layoutText = null;
         hasRunIndex = false;
         indexedRunLengths = [];
@@ -103,6 +106,7 @@ public partial class MarkdownTextBlock
         _paintSnapshot = TextPaintSnapshot.Empty;
         _paintSnapshotTextRuns = null;
         InvalidateInlineSpanCache();
+        if (notifyMutation) InlineContentInvalidated?.Invoke();
     }
 
     // Two reused maps retain only keys consulted while building the latest paint snapshot.

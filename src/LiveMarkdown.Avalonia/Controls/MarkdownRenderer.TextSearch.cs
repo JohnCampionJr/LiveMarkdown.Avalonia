@@ -217,6 +217,7 @@ partial class MarkdownRenderer
     {
         SetTextSearchMatcher(null);
         ClearAppliedTextSearch();
+        if (!_renderedTextProjectionWanted) collectedTextBlocks = [];
     }
 
     private void SetTextSearchMatcher(TextSearchMatcher? matcher)
@@ -252,10 +253,28 @@ partial class MarkdownRenderer
         TextSearchMatches = [];
     }
 
+    private MarkdownTextBlock[] collectedTextBlocks = [];
+
     private MarkdownTextBlock[] GetTextBlocksInRenderer()
     {
         RenderedTextBlockCollections++;
-        return [.. GetRenderedMarkdownTextBlockDescendants(documentNode.Control)];
+        // Validate order/visibility on every read, but retain the private array when the tree
+        // is unchanged. Custom nodes and external visual edits therefore remain observable.
+        var previous = collectedTextBlocks;
+        List<MarkdownTextBlock>? changed = null;
+        var count = 0;
+        foreach (var block in GetRenderedMarkdownTextBlockDescendants(documentNode.Control))
+        {
+            if (changed is null && (count >= previous.Length || !ReferenceEquals(previous[count], block)))
+            {
+                changed = new List<MarkdownTextBlock>(count + 1);
+                for (var i = 0; i < count; i++) changed.Add(previous[i]);
+            }
+            changed?.Add(block);
+            count++;
+        }
+        if (changed is null && count == previous.Length) return previous;
+        return collectedTextBlocks = changed is null ? previous[..count] : changed.ToArray();
     }
 
     internal void InvalidateRenderedTextState()
@@ -421,11 +440,22 @@ partial class MarkdownRenderer
         {
             var block = blocks[i];
             var state = _textSearchSnapshot[i];
-            if (!ReferenceEquals(state.Block, block) || !ReferenceEquals(state.Text, block.LayoutText)
-                || block.SearchMemo is not { } memo || memo.Generation != _textSearchGeneration
-                || !ReferenceEquals(memo.Text, state.Text) || !ReferenceEquals(memo.Ranges, state.Ranges)) return false;
+            if (!ReferenceEquals(state.Block, block)) return false;
+            var text = block.LayoutText;
+            IReadOnlyList<TextHighlightRange> ranges;
+            if (block.SearchMemo is { } memo && memo.Generation == _textSearchGeneration && ReferenceEquals(memo.Text, text))
+                ranges = memo.Ranges;
+            else
+            {
+                ranges = NormalizeRanges(_textSearchMatcher!(block, text), text.Length);
+                block.SearchMemo = (_textSearchGeneration, text, ranges);
+            }
+            // A changed tail can keep the same ranges. Public matches identify blocks/ranges,
+            // not a text revision, so their aggregate can survive that append unchanged.
+            if (!ReferenceEquals(state.Ranges, ranges) && !state.Ranges.SequenceEqual(ranges)) return false;
             block.Highlights.TryGetValue(_textSearchHighlightName, out var highlight);
             if (!ReferenceEquals(state.Highlight, highlight)) return false;
+            _textSearchSnapshot[i] = new(block, text, ranges, highlight);
         }
         return true;
     }

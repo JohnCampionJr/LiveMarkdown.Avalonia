@@ -8,6 +8,7 @@ using Avalonia.Controls.Primitives;
 using Avalonia.Input.Platform;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
+using Avalonia.LogicalTree;
 using Avalonia.Media;
 using Markdig.Syntax;
 using TextMateSharp.Grammars;
@@ -238,14 +239,16 @@ public class CodeBlock : TemplatedControl
     /// <summary>Gets the text blocks this code is laid out in, in order.</summary>
     public IReadOnlyList<MarkdownTextBlock> CodeTextBlocks
     {
-        get { mutableTextExposed = true; return chunks; }
+        get => readOnlyChunks ??= chunks.AsReadOnly();
     }
 
+    private IReadOnlyList<MarkdownTextBlock>? readOnlyChunks;
     private readonly List<MarkdownTextBlock> chunks = [];
     private readonly List<InlineCollection> chunkInlineCollections = [];
     private int firstDirtyContentLine;
     private int firstDirtyFormattingLine;
     private bool mutableTextExposed;
+    private bool validateDetachedContent;
     internal int LastHighlightLineVisits { get; private set; }
     internal int LastDeferredChunkVisits { get; private set; }
     internal int DeferredChunkCount => deferredInlines?.Count ?? 0;
@@ -288,6 +291,7 @@ public class CodeBlock : TemplatedControl
     /// <summary>Creates text blocks up to and including <paramref name="index"/>, and returns that one.</summary>
     private MarkdownTextBlock EnsureChunk(int index)
     {
+        using var ownEdit = SuspendSyntaxHighlighting();
         while (chunks.Count <= index)
         {
             var block = new MarkdownTextBlock
@@ -308,6 +312,7 @@ public class CodeBlock : TemplatedControl
             block.Bind(TemplatedControl.FontFamilyProperty, this.GetObservable(FontFamilyProperty));
             block.Bind(TextBlock.TextWrappingProperty, this.GetObservable(TextWrappingProperty));
             block.Inlines!.CollectionChanged += HandleInlinesChanged;
+            block.InlineContentInvalidated += HandleChunkContentInvalidated;
 
             chunks.Add(block);
             chunkInlineCollections.Add(block.Inlines);
@@ -319,6 +324,7 @@ public class CodeBlock : TemplatedControl
 
     private void AttachChunk(int index)
     {
+        using var ownEdit = SuspendSyntaxHighlighting();
         if (linesPanel is not { } panel) return;
         var block = chunks[index];
         if (DeferOffscreenChunkStyling && index > 0 && block.Inlines is { } inlines && CanDefer(inlines))
@@ -366,6 +372,7 @@ public class CodeBlock : TemplatedControl
 
     private void RestoreChunkStyling(MarkdownTextBlock block)
     {
+        using var ownEdit = SuspendSyntaxHighlighting();
         if (deferredInlines?.Remove(block, out var inlines) != true) return;
         block.EffectiveViewportChanged -= OnDeferredChunkViewportChanged;
         var start = block.SelectionStart;
@@ -449,6 +456,7 @@ public class CodeBlock : TemplatedControl
         while (chunks.Count > neededChunks)
         {
             var block = chunks[^1];
+            block.InlineContentInvalidated -= HandleChunkContentInvalidated;
             // This is the subscribed collection, which may differ from the block's current
             // collection when it was replaced externally while highlighting was disabled.
             chunkInlineCollections[^1].CollectionChanged -= HandleInlinesChanged;
@@ -496,7 +504,7 @@ public class CodeBlock : TemplatedControl
     /// </summary>
     public MarkdownTextBlock? CodeTextBlock
     {
-        get { mutableTextExposed = true; return chunks.Count > 0 ? chunks[0] : null; }
+        get => chunks.Count > 0 ? chunks[0] : null;
     }
 
     /// <summary>
@@ -561,14 +569,66 @@ public class CodeBlock : TemplatedControl
     {
     }
 
+    /// <inheritdoc/>
+    protected override void OnAttachedToLogicalTree(LogicalTreeAttachmentEventArgs e)
+    {
+        base.OnAttachedToLogicalTree(e);
+        ValidateChunkSources();
+        validateDetachedContent = false;
+    }
+
+    /// <inheritdoc/>
+    protected override void OnDetachedFromLogicalTree(LogicalTreeAttachmentEventArgs e)
+    {
+        validateDetachedContent = true;
+        base.OnDetachedFromLogicalTree(e);
+    }
+
+    private void ValidateChunkSources()
+    {
+        if (mutableTextExposed) return;
+        // Detached text blocks release nested collection subscriptions. Validate once on
+        // attachment, or before explicitly highlighting while detached, so missed external
+        // edits cannot masquerade as authoritative source. Unchanged views keep the fast path.
+        for (var chunkIndex = 0; chunkIndex < chunks.Count; chunkIndex++)
+        {
+            var inlines = InlinesOf(chunks[chunkIndex]);
+            var firstLine = chunkIndex * LinesPerChunk;
+            var count = Math.Min(LinesPerChunk, lineTexts.Count - firstLine);
+            if (!ReferenceEquals(inlines, chunkInlineCollections[chunkIndex]) ||
+                inlines.Count != Math.Max(0, (count * 2) - 1))
+            {
+                HandleChunkContentInvalidated();
+                return;
+            }
+            for (var i = 0; i < count; i++)
+            {
+                var text = lineTexts[firstLine + i];
+                var offset = 0;
+                if ((i > 0 && inlines[(i * 2) - 1] is not LineBreak) ||
+                    !LineMatches(inlines[i * 2], text, ref offset) || offset != text.Length)
+                {
+                    HandleChunkContentInvalidated();
+                    return;
+                }
+            }
+        }
+    }
+
     private void HandleInlinesChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        if (suspendedHighlightCount > 0 || isApplyingSyntaxHighlighting) return;
+        HandleChunkContentInvalidated();
+        if (AutoSyntaxHighlight) HighlightSyntax();
+    }
+
+    private void HandleChunkContentInvalidated()
     {
         if (suspendedHighlightCount > 0 || isApplyingSyntaxHighlighting) return;
         // Externally edited collections no longer have authoritative line metadata. Keep the
         // safe text-comparison path for this mutable view, including when highlighting is disabled.
         mutableTextExposed = true;
         firstDirtyContentLine = firstDirtyFormattingLine = 0;
-        if (AutoSyntaxHighlight) HighlightSyntax();
     }
 
     /// <summary>
@@ -691,6 +751,7 @@ public class CodeBlock : TemplatedControl
     public void HighlightSyntax()
     {
         if (isApplyingSyntaxHighlighting) return;
+        if (validateDetachedContent) ValidateChunkSources();
         if (string.IsNullOrWhiteSpace(Language) || chunks.Count == 0) return;
 
         LastDeferredChunkVisits = 0;

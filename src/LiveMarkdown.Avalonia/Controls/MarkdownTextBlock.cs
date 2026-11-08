@@ -337,10 +337,11 @@ public partial class MarkdownTextBlock : SelectableTextBlock
     /// <inheritdoc/>
     protected override void OnDetachedFromLogicalTree(LogicalTreeAttachmentEventArgs e)
     {
+        ReleaseSpareLayout();
         SubscribeToHighlightStyles(null);
         inlineCachesDetached = true;
         ObserveInlineContent(null);
-        InvalidateInlineContent();
+        InvalidateInlineContent(notifyMutation: false);
         _paintSnapshot = TextPaintSnapshot.Empty;
         _paintSnapshotTextRuns = null;
         _paintSnapshotDirty = true;
@@ -377,7 +378,7 @@ public partial class MarkdownTextBlock : SelectableTextBlock
         base.OnAttachedToLogicalTree(e);
         inlineCachesDetached = false;
         ObserveInlineContent(Inlines);
-        InvalidateInlineContent(); // content may have changed while detached
+        InvalidateInlineContent(notifyMutation: false); // discard caches without claiming an edit
         SubscribeToHighlightStyles(HighlightStyles);
     }
 
@@ -532,9 +533,10 @@ public partial class MarkdownTextBlock : SelectableTextBlock
     /// <inheritdoc/>
     protected override TextLayout CreateTextLayout(string? text)
     {
-        TextLayoutsCreated++;
-
         var maxSize = GetMaxSizeFromConstraint();
+        activeLayoutConstraint = maxSize;
+        if (TakeArrangeLayout(maxSize) is { } reused) return reused;
+        TextLayoutsCreated++;
         ref var cache = ref TextRunCacheOf(this);
         return CreateTextLayout(text, TextWrapping, maxSize.Width, maxSize.Height, cache ??= new TextRunCache());
     }
@@ -2394,6 +2396,7 @@ public partial class MarkdownTextBlock : SelectableTextBlock
     /// <inheritdoc/>
     protected override void OnMeasureInvalidated()
     {
+        ReleaseArrangeLayouts();
         var textRuns = _textRuns;
         base.OnMeasureInvalidated();
         _textRuns = textRuns;

@@ -17,9 +17,12 @@ public sealed class MarkdownUpdateProducer : AvaloniaObject, IMarkdownUpdateProd
     private static readonly Lazy<MarkdownPipeline> DefaultPipelineSource = new(() =>
     {
         var builder = new MarkdownPipelineBuilder().UseAdvancedExtensions().UseCodeBlockSpanFixer();
+        defaultSupportsFenceAppend = ConfigurePipeline is null;
         ConfigurePipeline?.Invoke(builder);
         return builder.Build();
     });
+
+    private static bool defaultSupportsFenceAppend;
 
     /// <summary>
     /// Gets the shared default Markdig pipeline. The pipeline is created when first accessed.
@@ -129,6 +132,11 @@ public sealed class MarkdownUpdateProducer : AvaloniaObject, IMarkdownUpdateProd
 
     /// <summary>The offset a splice re-parses from, or -1 when there is no usable restart point.</summary>
     private int restartOffset = -1;
+    private OpenFenceAppend? openFence;
+    private int parsedSourceLength;
+    private bool sourceEndedWithCarriageReturn;
+    internal long ParsedCharacters { get; private set; }
+    internal int FenceAppendCount { get; private set; }
 
     /// <summary>Whether the document is free of constructs a later line can reach back through.</summary>
     private bool documentIsSpliceable;
@@ -179,6 +187,9 @@ public sealed class MarkdownUpdateProducer : AvaloniaObject, IMarkdownUpdateProd
         forceFullUpdate = true;
         liveDocument = null;
         restartOffset = -1;
+        openFence = null;
+        parsedSourceLength = 0;
+        sourceEndedWithCarriageReturn = false;
         documentIsSpliceable = false;
         forceFullParseOnce = false;
 
@@ -240,9 +251,14 @@ public sealed class MarkdownUpdateProducer : AvaloniaObject, IMarkdownUpdateProd
                     && documentIsSpliceable
                     && restartOffset > 0
                     && change.StartIndex >= restartOffset;
-                var textOffset = splice ? restartOffset : 0;
+                var appendFence = IncrementalParsing && !forceFullParseOnce && !forceFullUpdate &&
+                    currentUpdate is not null && liveDocument is not null && documentIsSpliceable &&
+                    openFence is not null && !sourceEndedWithCarriageReturn &&
+                    change.StartIndex == parsedSourceLength && change.NewLength > parsedSourceLength &&
+                    change.Length == change.NewLength - parsedSourceLength;
+                var textOffset = appendFence ? openFence!.SnapshotOffset(parsedSourceLength) : splice ? restartOffset : 0;
 
-                var snapshot = splice ? source.CaptureSnapshot(textOffset) : source.CaptureSnapshot();
+                var snapshot = splice || appendFence ? source.CaptureSnapshot(textOffset) : source.CaptureSnapshot();
                 if (snapshot.Version != change.Version)
                 {
                     continue;
@@ -252,7 +268,9 @@ public sealed class MarkdownUpdateProducer : AvaloniaObject, IMarkdownUpdateProd
                 Markdig.Syntax.MarkdownDocument document;
                 try
                 {
-                    document = await Task.Run(() => Markdown.Parse(snapshot.Text, currentPipeline));
+                    var parseText = appendFence ? openFence!.OpeningLine + snapshot.Text : snapshot.Text;
+                    ParsedCharacters += parseText.Length;
+                    document = await Task.Run(() => Markdown.Parse(parseText, currentPipeline));
                 }
                 catch (Exception ex)
                 {
@@ -278,7 +296,21 @@ public sealed class MarkdownUpdateProducer : AvaloniaObject, IMarkdownUpdateProd
                 if (pendingChange is not { } latestChange || latestChange.Version != change.Version) continue;
 
                 int? unchangedPrefixBlockCount = null;
-                if (splice)
+                if (appendFence)
+                {
+                    if (!openFence!.Apply(liveDocument!, document, textOffset, out var retainedBlocks))
+                    {
+                        // A closing fence or a changed construct must be parsed in its real context.
+                        forceFullParseOnce = true;
+                        forceFullUpdate = true;
+                        continue;
+                    }
+                    document = liveDocument!;
+                    unchangedPrefixBlockCount = retainedBlocks;
+                    SpliceCount++;
+                    FenceAppendCount++;
+                }
+                else if (splice)
                 {
                     if (!IncrementalParse.CanSplice(document))
                     {
@@ -315,7 +347,14 @@ public sealed class MarkdownUpdateProducer : AvaloniaObject, IMarkdownUpdateProd
                 }
 
                 liveDocument = document;
-                restartOffset = IncrementalParse.RestartOffset(document, snapshot.Text, textOffset, restartOffset);
+                if (!appendFence)
+                {
+                    restartOffset = IncrementalParse.RestartOffset(document, snapshot.Text, textOffset, restartOffset);
+                    openFence = ReferenceEquals(currentPipeline, DefaultPipeline) && defaultSupportsFenceAppend && !currentPipeline.TrackTrivia
+                        ? OpenFenceAppend.Create(document, snapshot.Text, textOffset) : null;
+                }
+                parsedSourceLength = change.NewLength;
+                sourceEndedWithCarriageReturn = snapshot.Text.EndsWith('\r');
 
                 if (MarkdownRenderer.VerboseLogger?.IsValid is true)
                 {

@@ -38,6 +38,7 @@ public sealed class SyntaxHighlighting
     // any document. Held weakly, a collection between two scrolls dropped it and the next code block paid
     // the load again on the UI thread, mid-scroll.
     private static readonly Dictionary<string, SyntaxHighlighting> LanguageCache = [];
+    private static SyntaxHighlighting? unsupportedLanguage;
 
     // ── Block token cache ─────────────────────────────────────────────────────────────────────────────
     // Tokenizing is the cost of a code block: TextMate walks every line, and a rich grammar (C#) takes a
@@ -63,8 +64,9 @@ public sealed class SyntaxHighlighting
     }
 
     private const int BlockCacheCap = 1024;
+    private const long BlockCacheEntryWeightLimit = 512L * 1024;
     private static readonly SyntaxTokenCache<TokenizedBlock> BlockCache = new(
-        BlockCacheCap, weightLimit: 16L * 1024 * 1024, entryWeightLimit: 512L * 1024);
+        BlockCacheCap, weightLimit: 16L * 1024 * 1024, entryWeightLimit: BlockCacheEntryWeightLimit);
     private readonly System.Runtime.CompilerServices.ConditionalWeakTable<InlineCollection, TokenizedBlock> liveBlocks = new();
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<IGrammar, object> GrammarGates = new();
     private readonly object _tokenizeLock;
@@ -166,11 +168,15 @@ public sealed class SyntaxHighlighting
     /// <returns></returns>
     public static SyntaxHighlighting Create(string languageName)
     {
+        ArgumentNullException.ThrowIfNull(languageName);
+        languageName = languageName.ToLowerInvariant();
         lock (LanguageCache)
         {
             if (LanguageCache.TryGetValue(languageName, out var cached)) return cached;
 
-            var instance = new SyntaxHighlighting(languageName);
+            var scopeName = ResolveScope(languageName);
+            if (scopeName is null) return unsupportedLanguage ??= new SyntaxHighlighting(string.Empty, null);
+            var instance = new SyntaxHighlighting(languageName, scopeName);
             LanguageCache[languageName] = instance;
             return instance;
         }
@@ -182,11 +188,15 @@ public sealed class SyntaxHighlighting
     /// <summary>
     /// Tokenizes <paramref name="text"/> now and keeps the result, so the first code block with this text
     /// formats from cache. Safe to call from any thread: only one line holds the shared grammar gate at a time;
-    /// fully reused foreground tokens do not enter that gate.
+    /// fully reused foreground tokens do not enter that gate. Oversized warm-ups are skipped when
+    /// their minimum retained weight exceeds the shared cache's entry budget; foreground formatting is unaffected.
     /// </summary>
     public void Prewarm(string text)
     {
         if (_grammar is null || string.IsNullOrEmpty(text)) return;
+        // The key and retained lines alone cost at least four bytes per source character.
+        // Do not tokenize a warm-up whose result cannot enter the bounded shared cache.
+        if (4L * text.Length > BlockCacheEntryWeightLimit) return;
         var lines = text.Split('\n');
         if (lines.Length > 0 && lines[^1].Length == 0) Array.Resize(ref lines, lines.Length - 1);
         TokenizeBlock(lines, previous: null, firstDirtyLine: null, out _);
@@ -304,17 +314,18 @@ public sealed class SyntaxHighlighting
         return GetBuiltInThemeCacheEntry(fallbackThemeName);
     }
 
-    /// <summary>
-    /// Initializes a new instance of the <see cref="SyntaxHighlighting"/> class.
-    /// </summary>
-    /// <param name="languageName"></param>
     private readonly string _languageName;
 
-    internal SyntaxHighlighting(string languageName)
+    private static string? ResolveScope(string languageName) =>
+        RegistryOptions.GetScopeByLanguageId(languageName) ?? RegistryOptions.GetScopeByExtension('.' + languageName);
+
+    /// <summary>Initializes a highlighter using the registry's scope mapping.</summary>
+    internal SyntaxHighlighting(string languageName) : this(languageName, ResolveScope(languageName)) { }
+
+    private SyntaxHighlighting(string languageName, string? scopeName)
     {
         _languageName = languageName;
         _tokenizeLock = new object();
-        var scopeName = RegistryOptions.GetScopeByLanguageId(languageName) ?? RegistryOptions.GetScopeByExtension('.' + languageName);
         if (scopeName == null) return;
 
         _grammar = Registry.LoadGrammar(scopeName);

@@ -565,84 +565,63 @@ public class MarkdownRendererDocumentTests
     }
 
     [Test]
-    public async Task MarkdownBuilder_ParseStartedWhileAttached_CompletesAfterDetach()
+    public async Task MarkdownBuilder_InFlightParseIsNotAppliedAfterDetachAndReattachmentCatchesUp()
     {
-        var firstDocument = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var rendererState = await session.Dispatch(
-            () =>
+        await session.Dispatch(async () =>
+        {
+            using var release = new ManualResetEventSlim();
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var blockParsing = false;
+            var pipeline = new MarkdownPipelineBuilder().UseAdvancedExtensions().UseCodeBlockSpanFixer();
+            pipeline.DocumentProcessed += _ =>
             {
-                var builder = new ObservableStringBuilder("initial");
-                var renderer = new MarkdownRenderer { MarkdownBuilder = builder };
-                renderer.PropertyChanged += (_, e) =>
-                {
-                    if (e.Property == MarkdownRenderer.DocumentUpdateProperty)
-                    {
-                        firstDocument.TrySetResult();
-                    }
-                };
-
-                var window = new Window
-                {
-                    Width = 400,
-                    Height = 200,
-                    Content = renderer,
-                };
+                if (!Volatile.Read(ref blockParsing)) return;
+                entered.TrySetResult();
+                release.Wait();
+            };
+            var builder = new ObservableStringBuilder("initial");
+            var producer = new MarkdownUpdateProducer { Pipeline = pipeline.Build(), MarkdownBuilder = builder };
+            var renderer = new MarkdownRenderer { UpdateProducer = producer };
+            var first = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            renderer.PropertyChanged += (_, e) => { if (e.Property == MarkdownRenderer.DocumentUpdateProperty) first.TrySetResult(); };
+            var window = new Window { Width = 400, Height = 200, Content = renderer };
+            Task? inFlight = null;
+            try
+            {
                 window.Show();
-                return (window, renderer, builder);
-            },
-            CancellationToken.None);
-
-        try
-        {
-            await WaitForDocumentAsync(firstDocument.Task);
-
-            var secondDocument = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            await session.Dispatch(
-                () =>
-                {
-                    rendererState.renderer.PropertyChanged += (_, e) =>
-                    {
-                        if (e.Property == MarkdownRenderer.DocumentUpdateProperty)
-                        {
-                            secondDocument.TrySetResult();
-                        }
-                    };
-                    rendererState.builder.Append(" content");
-                    rendererState.window.Content = null;
-                    rendererState.window.Close();
-                },
-                CancellationToken.None);
-
-            await WaitForDocumentAsync(secondDocument.Task);
-            var result = await session.Dispatch(
-                () => (
-                    TopLevel: TopLevel.GetTopLevel(rendererState.renderer),
-                    RenderedText: GetRenderedText(rendererState.renderer)),
-                CancellationToken.None);
-
-            Assert.Multiple(() =>
+                await first.Task;
+                var previous = renderer.DocumentUpdate;
+                Volatile.Write(ref blockParsing, true);
+                builder.Append(" content");
+                await entered.Task;
+                inFlight = (Task?)typeof(MarkdownUpdateProducer).GetField("parseTask",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(producer);
+                Assert.That(inFlight, Is.Not.Null);
+                window.Content = null; window.UpdateLayout();
+                Volatile.Write(ref blockParsing, false);
+                release.Set();
+                await inFlight!;
+                Assert.That(renderer.DocumentUpdate, Is.SameAs(previous));
+                Assert.That(GetRenderedText(renderer), Is.EqualTo(new[] { "initial" }));
+                var fresh = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                renderer.PropertyChanged += (_, e) => { if (e.Property == MarkdownRenderer.DocumentUpdateProperty) fresh.TrySetResult(); };
+                window.Content = renderer; window.UpdateLayout();
+                await fresh.Task;
+                Assert.That(GetRenderedText(renderer), Is.EqualTo(new[] { "initial content" }));
+            }
+            finally
             {
-                Assert.That(result.TopLevel, Is.Null);
-                Assert.That(result.RenderedText, Is.EqualTo(new[] { "initial content" }));
-            });
-        }
-        finally
-        {
-            await session.Dispatch(rendererState.window.Close, CancellationToken.None);
-        }
+                Volatile.Write(ref blockParsing, false);
+                release.Set();
+                if (inFlight is not null) await inFlight;
+                window.Close();
+            }
+            return true;
+        }, CancellationToken.None);
     }
 
-    private async Task WaitForDocumentAsync(Task documentTask)
-    {
-        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        while (!documentTask.IsCompleted)
-        {
-            await Task.Delay(10, cancellation.Token);
-            await session.Dispatch(static () => { }, cancellation.Token);
-        }
-
-        await documentTask;
-    }
+    private async Task WaitForDocumentAsync(Task documentTask) =>
+        await session.Dispatch(async () => { await documentTask; return true; }, CancellationToken.None);
 
     private static string[] GetRenderedText(MarkdownRenderer renderer) =>
     [
