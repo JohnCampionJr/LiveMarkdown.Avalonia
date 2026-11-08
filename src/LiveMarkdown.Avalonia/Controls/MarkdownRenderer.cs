@@ -248,6 +248,7 @@ public partial class MarkdownRenderer : Control
         }
 
         RenderedTextProjection = null;
+        _renderedTextStateVersion = null;
         if (value is not null)
         {
             // The search is NOT torn down here. Removing a named highlight that carries a foreground

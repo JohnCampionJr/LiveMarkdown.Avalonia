@@ -233,6 +233,41 @@ public class MarkdownTextSearchTests
         Assert.That(block.Highlights.Count, Is.Zero);
     }
 
+    /// <summary>
+    /// Re-applying the SAME delegate instance after changing what it captures must re-match, not serve
+    /// what that delegate said last time.
+    /// </summary>
+    /// <remarks>The blocks memoise their match results so that a layout does not re-derive an answer for
+    /// text that has not changed. The memo is keyed on a generation the renderer bumps whenever a matcher
+    /// is installed or cleared, rather than on the delegate's identity, precisely so this case is covered:
+    /// here the delegate, the block and its text are all unchanged between the two calls, and only the
+    /// captured word differs. Keyed on identity this test returns "one" the second time.</remarks>
+    [Test]
+    public void ApplyTextSearch_WhenTheSameDelegateIsReappliedWithNewState_ReMatches()
+    {
+        var renderer = new TestMarkdownRenderer();
+        var block = new MarkdownTextBlock { Text = "one two" };
+        renderer.Add(block);
+
+        var word = "one";
+        TextSearchMatcher matcher = (_, text) =>
+        {
+            var index = text.IndexOf(word, StringComparison.Ordinal);
+            return index < 0 ? [] : [new TextHighlightRange(index, word.Length)];
+        };
+
+        var first = renderer.ApplyTextSearch(matcher);
+        Assert.That(first.Single().Range, Is.EqualTo(new TextHighlightRange(0, 3)));
+
+        word = "two";
+        var second = renderer.ApplyTextSearch(matcher);
+
+        Assert.That(
+            second.Single().Range,
+            Is.EqualTo(new TextHighlightRange(4, 3)),
+            "the second application must re-run the matcher rather than reuse the memo");
+    }
+
     [Test]
     public void ApplyTextSearch_ChangingHighlightNameRemovesPreviousRanges()
     {

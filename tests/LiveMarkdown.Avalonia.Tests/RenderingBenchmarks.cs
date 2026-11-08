@@ -141,6 +141,79 @@ public class RenderingBenchmarks
     }
 
     /// <summary>
+    /// What an active search costs AS THE DOCUMENT GROWS — the shape, not a single number.
+    /// </summary>
+    /// <remarks>
+    /// <para><see cref="StreamingParagraphsWithActiveSearch"/> measures a fixed 120 paragraphs, so it
+    /// reports a cost without saying what that cost is a function of. This runs the same work in
+    /// stages, with and without the search, because the interesting quantity is the DIFFERENCE per
+    /// stage: the matcher runs over every block in the renderer on every completed layout, so if the
+    /// gap between the two columns grows stage over stage then the search is O(document) per append
+    /// and a long transcript pays for a query it already answered.</para>
+    ///
+    /// <para>Stages rather than an average for the same reason the growing-paragraph scenario uses
+    /// them: an average over a run that starts empty and ends long hides exactly the growth being
+    /// looked for.</para>
+    /// </remarks>
+    [Test]
+    public async Task SearchWhileTheDocumentGrows()
+    {
+        const int stages = 4;
+        const int perStage = 100;
+
+        var reports = await session.Dispatch(
+            () =>
+            {
+                var collected = new List<BenchmarkReport>();
+
+                // Three configurations, because the two searches are opposite ends of the same feature.
+                // "item" is in every paragraph the fixture writes, so it matches EVERY block twice — the
+                // worst case, where the result set itself is O(document) and no caching can shrink it.
+                // The rare query matches nothing, which is what a real search mostly does: a person hunts
+                // for one error message in a long transcript, and the blocks that do not contain it are
+                // the overwhelming majority. A fix that only helps the worst case would be measuring a
+                // scenario nobody has.
+                foreach (var (label, query) in new (string, string?)[]
+                {
+                    ("no search", null),
+                    ("search matching every block", "item"),
+                    ("search matching nothing", "xyzzy-no-such-token"),
+                })
+                {
+                    using var harness = new StreamingHarness(label);
+
+                    if (query is not null)
+                    {
+                        var styles = new TextHighlightStyles();
+                        styles.Set(
+                            MarkdownRenderer.DefaultTextSearchHighlightName,
+                            new TextHighlightStyle { Background = Brushes.Yellow, Foreground = Brushes.Red });
+                        MarkdownTextBlock.SetHighlightStyles(harness.Renderer, styles);
+                        harness.Renderer.ApplyTextSearch(query);
+                    }
+
+                    for (var stage = 0; stage < stages; stage++)
+                    {
+                        harness.ResetSamples();
+                        for (var i = 0; i < perStage; i++)
+                        {
+                            harness.Append(Paragraph(stage * perStage + i) + "\n\n");
+                        }
+
+                        collected.Add(harness.ReportStage(
+                            $"{label} — appends {stage * perStage + 1}-{(stage + 1) * perStage} "
+                            + $"(document is {(stage + 1) * perStage} paragraphs)"));
+                    }
+                }
+
+                return collected;
+            },
+            CancellationToken.None);
+
+        foreach (var report in reports) Publish(report);
+    }
+
+    /// <summary>
     /// Baseline for the other streaming scenarios: plain paragraphs, no search, no chips.
     /// </summary>
     [Test]
@@ -162,6 +235,139 @@ public class RenderingBenchmarks
             CancellationToken.None);
 
         Publish(report);
+    }
+
+    /// <summary>
+    /// A paragraph written a sentence at a time — the shape prose actually streams in.
+    /// </summary>
+    /// <remarks>
+    /// <para>Every other streaming scenario here appends a WHOLE paragraph, so each append creates a
+    /// new block and the block it lands in is always empty. That is the easy half of streaming. An
+    /// agent writing prose does the other half: sentence after sentence into the SAME paragraph,
+    /// which re-lays-out entirely each time.</para>
+    ///
+    /// <para>The hole this closes was found from the Tweed side, where a token into a growing
+    /// paragraph measured 1.9 ms rising to 7.0 while the same token starting a new paragraph stayed
+    /// flat at 0.8. Three reports, over the same run, so the growth is visible rather than averaged
+    /// away: what an append costs while the paragraph is short, middling and long.</para>
+    /// </remarks>
+    [Test]
+    public async Task StreamingAGrowingParagraph()
+    {
+        const int sentencesPerStage = 40;
+
+        var reports = await session.Dispatch(
+            () =>
+            {
+                using var harness = new StreamingHarness("Streaming a growing paragraph");
+                var written = 0;
+                var stages = new List<BenchmarkReport>();
+
+                foreach (var stage in new[] { "short", "middling", "long" })
+                {
+                    harness.ResetSamples();
+                    var layoutsBefore = MarkdownTextBlock.TextLayoutsCreated;
+                    for (var i = 0; i < sentencesPerStage; i++)
+                    {
+                        harness.Append(Sentence(written++));
+                    }
+
+                    var layouts = (MarkdownTextBlock.TextLayoutsCreated - layoutsBefore) / (double)sentencesPerStage;
+                    stages.Add(harness.ReportStage(
+                        $"Streaming a sentence into a {stage} paragraph ({layouts:F1} text layouts per append)"));
+                }
+
+                return stages;
+            },
+            CancellationToken.None);
+
+        foreach (var report in reports) Publish(report);
+    }
+
+    /// <summary>One sentence of prose, with the inline formatting a reply carries, and a space to join.</summary>
+    private static string Sentence(int i) =>
+        $"Sentence {i} of the reply, with **bold** and `code` in it, long enough to matter. ";
+
+    /// <summary>
+    /// Phase 4b: appending to a document that is ALREADY long, through the real producer.
+    /// </summary>
+    /// <remarks>
+    /// Every other scenario here drives the renderer directly and parses on the calling thread, which
+    /// is fine for measuring what rendering costs but says nothing about the producer. This one goes
+    /// through <see cref="ObservableStringBuilder"/> and <see cref="MarkdownUpdateProducer"/> as a host
+    /// does, so the parse runs where it really runs — off the UI thread — and what is measured is what
+    /// the UI thread actually pays, plus the wall-clock wait from append to rendered.
+    ///
+    /// <para>It exists because the suite's other documents top out around 20,000 characters, and the
+    /// cost this measures does not appear until well past that: a transcript reaches a quarter of a
+    /// megabyte, and re-parsing the whole of it on every token is invisible at 20 KB.</para>
+    /// </remarks>
+    [Test]
+    public async Task StreamingIntoALongDocument()
+    {
+        const int seedBytes = 250 * 1024;
+        const int appends = 30;
+
+        var report = await session.Dispatch(
+            () =>
+            {
+                var builder = new ObservableStringBuilder();
+                var renderer = new MarkdownRenderer { MarkdownBuilder = builder };
+                var window = CreateWindow(renderer);
+                try
+                {
+                    window.Show();
+                    window.UpdateLayout();
+
+                    var seed = new StringBuilder();
+                    var next = 0;
+                    while (seed.Length < seedBytes) seed.Append(Paragraph(next++)).Append("\n\n");
+                    builder.Append(seed.ToString());
+                    Settle(window, builder, renderer);
+
+                    var samples = new List<PhaseSample>();
+                    long allocated = 0;
+                    for (var i = 0; i < appends; i++)
+                    {
+                        var text = Paragraph(next++) + "\n\n";
+                        var before = GC.GetAllocatedBytesForCurrentThread();
+                        var append = Time(() => builder.Append(text));
+                        var settle = Time(() => Settle(window, builder, renderer));
+                        allocated += GC.GetAllocatedBytesForCurrentThread() - before;
+                        samples.Add(new PhaseSample(0, append, settle));
+                    }
+
+                    return new BenchmarkReport(
+                        $"Appending to a {builder.Length / 1024} KB document through the real producer",
+                        samples,
+                        allocated,
+                        builder.Length,
+                        "Append() on the UI thread",
+                        "append to rendered (parse runs off-thread)");
+                }
+                finally
+                {
+                    window.Close();
+                }
+            },
+            CancellationToken.None);
+
+        Publish(report);
+    }
+
+    /// <summary>Pumps until the renderer has taken the builder's latest version.</summary>
+    private static void Settle(Window window, ObservableStringBuilder builder, MarkdownRenderer renderer)
+    {
+        var deadline = Stopwatch.GetTimestamp() + (Stopwatch.Frequency * 10);
+        while (Stopwatch.GetTimestamp() < deadline)
+        {
+            Dispatcher.UIThread.RunJobs();
+            window.UpdateLayout();
+            if (renderer.DocumentUpdate is { } update && update.Version >= builder.Version) return;
+            Thread.Sleep(0);
+        }
+
+        throw new TimeoutException("the producer never caught up with the builder");
     }
 
     /// <summary>
@@ -354,6 +560,100 @@ public class RenderingBenchmarks
         return builder.ToString();
     }
 
+    /// <summary>
+    /// What one message costs to put on screen from nothing. This is not the streaming path — it is
+    /// the SCROLL path: a host that virtualizes its transcript realizes a row as it comes into view,
+    /// and pays this for it, on the UI thread, inside a frame. Every other scenario here measures
+    /// what an already-realized document costs to change.
+    /// </summary>
+    [Test]
+    public async Task RealizingAMessageFromCold()
+    {
+        foreach (var size in new[] { 1000, 4000, 16000 })
+        {
+            var markdown = AgentMessage(size);
+            var report = await session.Dispatch(
+                () =>
+                {
+                    // Two throwaway passes: the first realization of anything in a process pays for
+                    // the font manager, the grammar registry and every static this library caches.
+                    for (var warm = 0; warm < 2; warm++) Realize(markdown);
+
+                    GC.Collect();
+                    GC.WaitForPendingFinalizers();
+                    GC.Collect();
+
+                    const int repetitions = 6;
+                    var samples = new List<PhaseSample>();
+                    long allocated = 0;
+                    for (var i = 0; i < repetitions; i++)
+                    {
+                        var before = GC.GetAllocatedBytesForCurrentThread();
+                        samples.Add(Realize(markdown));
+                        allocated += GC.GetAllocatedBytesForCurrentThread() - before;
+                    }
+
+                    return new BenchmarkReport(
+                        $"Realizing a {markdown.Length / 1024} KB message from cold",
+                        samples,
+                        allocated,
+                        markdown.Length,
+                        "render (node sync)",
+                        "layout (measure + arrange)");
+                },
+                CancellationToken.None);
+
+            Publish(report);
+        }
+    }
+
+    /// <summary>Builds and lays out one message in a fresh renderer, timing each phase.</summary>
+    private static PhaseSample Realize(string markdown)
+    {
+        Markdig.Syntax.MarkdownDocument document = null!;
+        var parse = Time(() => document = Markdown.Parse(markdown, MarkdownUpdateProducer.DefaultPipeline));
+
+        var renderer = new MarkdownRenderer();
+        var window = CreateWindow(renderer);
+        try
+        {
+            // The window is shown and laid out empty first, so its own construction is not in either
+            // phase below — a host realizing a row already has one.
+            window.Show();
+            window.UpdateLayout();
+
+            var render = Time(() => renderer.DocumentUpdate = new MarkdownDocumentUpdate.Full(document));
+            var layout = Time(() =>
+            {
+                window.UpdateLayout();
+                Dispatcher.UIThread.RunJobs();
+            });
+
+            return new PhaseSample(parse, render, layout);
+        }
+        finally
+        {
+            window.Close();
+        }
+    }
+
+    /// <summary>Prose with the formatting an agent reply carries, and a fence every fifth block.</summary>
+    private static string AgentMessage(int approximateLength)
+    {
+        var builder = new StringBuilder();
+        var i = 0;
+        while (builder.Length < approximateLength)
+        {
+            builder.Append(i % 5 == 4
+                ? $"```csharp\nvar value{i} = Compute({i});\n```\n\n"
+                : $"Paragraph {i} of an agent reply, with **bold**, `code` and a "
+                    + $"[link](https://example.com/{i}) in it, long enough to wrap across lines.\n\n");
+            i++;
+        }
+
+        return builder.ToString();
+    }
+
     private static Window CreateWindow(MarkdownRenderer renderer) => new()
     {
         Width = 800,
@@ -390,7 +690,10 @@ public class RenderingBenchmarks
         IReadOnlyList<PhaseSample> samples,
         long allocatedBytes,
         int finalLength,
-        string renderLabel = "render (node sync)")
+        string renderLabel = "render (node sync)",
+        string layoutLabel = "layout (measure + arrange)",
+        long renderBytes = 0,
+        long layoutBytes = 0)
     {
         public string ToMarkdown()
         {
@@ -401,12 +704,24 @@ public class RenderingBenchmarks
             builder.AppendLine("|---|---:|---:|---:|---:|---:|");
             AppendRow("parse (Markdig)", samples.Select(s => s.ParseMs));
             AppendRow(renderLabel, samples.Select(s => s.RenderMs));
-            AppendRow("layout (measure + arrange)", samples.Select(s => s.LayoutMs));
+            AppendRow(layoutLabel, samples.Select(s => s.LayoutMs));
             if (samples.Any(s => s.LayoutMs > 0)) AppendRow("render + layout", samples.Select(s => s.OwnedMs));
             builder.AppendLine();
             builder.Append("steps: ").Append(samples.Count)
                 .Append(", final length: ").Append(finalLength.ToString("N0"))
-                .Append(" chars, allocated: ").Append((allocatedBytes / (1024d * 1024d)).ToString("F1")).AppendLine(" MB");
+                .Append(" chars, allocated: ").Append((allocatedBytes / (1024d * 1024d)).ToString("F1")).Append(" MB");
+
+            // Which side of the fence the bytes are on is the whole question for anything that grows:
+            // the node sync is ours and can be fixed, the layout is Avalonia's text pipeline.
+            if (renderBytes > 0 || layoutBytes > 0)
+            {
+                builder
+                    .Append(" (").Append(renderLabel).Append(' ').Append((renderBytes / (double)samples.Count / 1024d).ToString("F0"))
+                    .Append(" KB, ").Append(layoutLabel).Append(' ').Append((layoutBytes / (double)samples.Count / 1024d).ToString("F0"))
+                    .Append(" KB per step)");
+            }
+
+            builder.AppendLine();
             return builder.ToString();
 
             void AppendRow(string phase, IEnumerable<double> values)
@@ -444,6 +759,8 @@ public class RenderingBenchmarks
         private MarkdownDocumentUpdate? previous;
         private long version;
         private long allocated;
+        private long renderAllocated;
+        private long layoutAllocated;
 
         public MarkdownRenderer Renderer { get; }
 
@@ -475,12 +792,17 @@ public class RenderingBenchmarks
                 new MarkdownDocumentUpdate.Full(document, change.Version) :
                 new MarkdownDocumentUpdate.Incremental(previous, document, change);
 
+            var beforeRender = GC.GetAllocatedBytesForCurrentThread();
             var renderMs = Time(() => Renderer.DocumentUpdate = update);
+            var beforeLayout = GC.GetAllocatedBytesForCurrentThread();
             var layoutMs = Time(() =>
             {
                 Dispatcher.UIThread.RunJobs();
                 Window.UpdateLayout();
             });
+
+            renderAllocated += beforeLayout - beforeRender;
+            layoutAllocated += GC.GetAllocatedBytesForCurrentThread() - beforeLayout;
 
             allocated += GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
             previous = update;
@@ -491,11 +813,24 @@ public class RenderingBenchmarks
         {
             samples.Clear();
             allocated = 0;
+            renderAllocated = 0;
+            layoutAllocated = 0;
         }
 
         public void AddSample(PhaseSample sample) => samples.Add(sample);
 
         public void AddAllocated(long bytes) => allocated += bytes;
+
+        /// <summary>A report of the samples taken so far under a title of its own, for a run
+        /// measured in stages rather than as one average.</summary>
+        public BenchmarkReport ReportStage(string stageTitle) =>
+            new(
+                stageTitle,
+                [.. samples],
+                allocated,
+                source.Length,
+                renderBytes: renderAllocated,
+                layoutBytes: layoutAllocated);
 
         public BenchmarkReport Report(string? renderLabel = null) =>
             renderLabel is null ?

@@ -670,6 +670,9 @@ internal static class InlineExtension
         {
             switch (inline)
             {
+                // A dot's joiner holds its place in the layout, but is not text anybody wrote.
+                case DotInline when projection != InlineTextProjection.Layout:
+                    break;
                 case Run run:
                     stringBuilder.Append(run.Text);
                     break;

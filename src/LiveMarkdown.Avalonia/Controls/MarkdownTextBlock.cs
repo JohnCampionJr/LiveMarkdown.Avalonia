@@ -17,6 +17,7 @@ using Avalonia.Media.TextFormatting;
 using Avalonia.VisualTree;
 using Markdig.Syntax;
 using GraphemeEnumerator = Avalonia.Media.TextFormatting.Unicode.GraphemeEnumerator;
+using LineBreakEnumerator = Avalonia.Media.TextFormatting.Unicode.LineBreakEnumerator;
 
 namespace LiveMarkdown.Avalonia;
 
@@ -166,6 +167,28 @@ public partial class MarkdownTextBlock : SelectableTextBlock
     public string LayoutText => _layoutText ??= Inlines is { Count: > 0 } inlines ? inlines.LayoutText : Text ?? string.Empty;
 
     /// <summary>
+    /// What the renderer's active text search last found in THIS block, and what it found it in — the
+    /// matcher it ran and the <see cref="LayoutText"/> instance it ran over.
+    /// </summary>
+    /// <remarks>
+    /// <para>The search re-runs on every completed layout, over every block in the renderer, because a
+    /// layout is the only point at which the text is known to be settled. Streaming a token changes ONE
+    /// block, so re-matching the rest re-derives an answer that cannot have changed — and it was
+    /// measured doing exactly that: 254 KB per append into a 400-paragraph document, against 39 KB for
+    /// the same append with no search, growing linearly with the document.</para>
+    ///
+    /// <para>Keying on the <see cref="LayoutText"/> INSTANCE is what makes this safe rather than clever.
+    /// The field behind that property is nulled whenever the block's content changes and rebuilt on the
+    /// next read, so a changed block always presents a different string object and misses the memo. Two
+    /// equal strings from separate rebuilds also miss it — a wasted re-match, never a stale answer, which
+    /// is the direction an optimisation of this kind has to fail in. The generation alongside it is the
+    /// renderer's search generation, bumped whenever a matcher is installed or cleared, so applying a search
+    /// invalidates every block by construction — there is no reset for a caller to forget, and it also
+    /// covers a caller re-applying the SAME delegate after changing what it captured.</para>
+    /// </remarks>
+    internal (int Generation, string Text, IReadOnlyList<TextHighlightRange> Ranges)? SearchMemo;
+
+    /// <summary>
     /// Gets the selected text represented by this block, preserving nested inline content.
     /// </summary>
     public string ActualSelectedText
@@ -193,6 +216,12 @@ public partial class MarkdownTextBlock : SelectableTextBlock
             {
                 switch (inline)
                 {
+                    case DotInline dot:
+                    {
+                        // Its place in the layout, not its joiner: a copied selection leaves it out.
+                        if (currentIndex < selectionEnd) currentIndex += dot.Text?.Length ?? 0;
+                        break;
+                    }
                     case Run run:
                     {
                         AppendText(run.Text);
@@ -459,8 +488,93 @@ public partial class MarkdownTextBlock : SelectableTextBlock
     [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "set_LineSpacing")]
     private extern static void SetLineSpacing(TextParagraphProperties properties, double value);
 
+    /// <summary>
+    /// The base class's cache of SHAPED runs, which its own <c>CreateTextLayout</c> passes to every
+    /// layout it builds, and which this override has to pass too.
+    /// </summary>
+    /// <remarks>
+    /// <para>Avalonia's <c>TextBlock.ArrangeOverride</c> disposes the layout the measure just built and
+    /// makes another — deliberately, because the arrange constraint can differ from the measure's — and
+    /// the cache is what is supposed to make that second one cheap: "preserve the TextRunCache so
+    /// shaped runs are reused", as the comment there says. It is keyed by the text source index each
+    /// line starts at, so re-laying-out re-wraps rather than re-shapes.</para>
+    ///
+    /// <para>Reached rather than replaced, so the cache keeps the lifetime the base gives it: the
+    /// <c>InvalidateTextLayout</c> this control already calls invalidates it, and a measure
+    /// invalidation deliberately does not. A cache of our own would have to reproduce both, and would
+    /// get it wrong the first time either changed.</para>
+    /// </remarks>
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_textRunCache")]
+    private extern static ref TextRunCache? TextRunCacheOf(TextBlock block);
+
+    /// <summary>
+    /// Counts text layouts built, across every block. A layout is the whole cost of a paragraph —
+    /// shaping and wrapping every run in it — so how many are built per change is the thing to hold
+    /// a streaming block to. Read by the cost tests.
+    /// </summary>
+    internal static int TextLayoutsCreated;
+
     /// <inheritdoc/>
     protected override TextLayout CreateTextLayout(string? text)
+    {
+        TextLayoutsCreated++;
+
+        var maxSize = GetMaxSizeFromConstraint();
+        ref var cache = ref TextRunCacheOf(this);
+        return CreateTextLayout(text, TextWrapping, maxSize.Width, maxSize.Height, cache ??= new TextRunCache());
+    }
+
+    /// <summary>
+    /// The width of this block's widest unbreakable run — its longest word, a whole inline-code chip — plus its
+    /// padding: the narrowest it can be laid out without breaking inside a word. What
+    /// <see cref="MarkdownTableGrid"/> floors a column at.
+    /// </summary>
+    /// <remarks>
+    /// One unwrapped layout of its own, cut at the same UAX #14 break opportunities <see cref="TextWrapping.Wrap"/>
+    /// uses, with each stretch between them measured by hit-testing. Two shortcuts were measured and do not work:
+    /// measuring the control narrow (a control's desired size is clamped to the constraint it is given), and a
+    /// layout with <see cref="TextWrapping.WrapWithOverflow"/> at a tiny width (built from this block's text
+    /// source it still broke "HeatherLight" into pieces 11px wide; at width 0 it lays out nothing at all).
+    /// </remarks>
+    internal double MeasureLongestWord()
+    {
+        using var layout = CreateTextLayout(Text, TextWrapping.NoWrap, double.PositiveInfinity, double.PositiveInfinity, null);
+        // LayoutText, not ActualText: an embedded control (an inline icon or swatch) holds one position in the
+        // layout but none in the logical text, so ActualText's indices drift from the layout's after it.
+        var text = layout.TextLines.Count == 0 ? "" : LayoutText;
+
+        var widest = 0.0;
+        var start = 0;
+        var breaks = new LineBreakEnumerator(text.AsSpan());
+        while (breaks.MoveNext(out var lineBreak))
+        {
+            // UAX #14 allows a break on either side of an embedded control, but the formatter keeps one glued
+            // to the text it touches (an icon or swatch never wraps away from its chip). Skip those breaks, so
+            // the control and its neighbour measure as the one unit they lay out as.
+            var at = lineBreak.PositionWrap;
+            if (at > 0 && at < text.Length && IsGluedToEmbeddedControl(text, at)) continue;
+
+            // PositionMeasure excludes the trailing whitespace a line would hang at a break.
+            var length = lineBreak.PositionMeasure - start;
+            if (length > 0)
+            {
+                widest = Math.Max(widest, layout.HitTestTextRange(start, length).Sum(r => r.Width));
+            }
+
+            start = at;
+        }
+
+        return Math.Ceiling(widest) + Padding.Left + Padding.Right;
+
+        static bool IsGluedToEmbeddedControl(string text, int at)
+        {
+            const char objectReplacement = MarkdownTextProjection.ObjectReplacementCharacter;
+            return (text[at - 1] == objectReplacement && !char.IsWhiteSpace(text[at]))
+                || (text[at] == objectReplacement && !char.IsWhiteSpace(text[at - 1]));
+        }
+    }
+
+    private TextLayout CreateTextLayout(string? text, TextWrapping wrapping, double maxWidth, double maxHeight, TextRunCache? cache)
     {
         var typeface = new Typeface(FontFamily, FontStyle, FontWeight, FontStretch);
 
@@ -477,7 +591,7 @@ public partial class MarkdownTextBlock : SelectableTextBlock
             true,
             false,
             defaultProperties,
-            TextWrapping,
+            wrapping,
             LineHeight,
             0,
             LetterSpacing);
@@ -504,8 +618,14 @@ public partial class MarkdownTextBlock : SelectableTextBlock
             textSource = new MarkdownSimpleTextSource(text ?? string.Empty, defaultProperties, textStyles);
         }
 
-        var maxSize = GetMaxSizeFromConstraint();
-        return new TextLayout(textSource, paragraphProperties, TextTrimming, maxSize.Width, maxSize.Height, MaxLines);
+        return new TextLayout(
+            textSource,
+            paragraphProperties,
+            TextTrimming,
+            maxWidth,
+            maxHeight,
+            MaxLines,
+            cache);
     }
 
     /// <inheritdoc/>
@@ -514,7 +634,7 @@ public partial class MarkdownTextBlock : SelectableTextBlock
         var snapshot = GetPaintSnapshot(_textRuns);
         var highlightPaint = GetRegisteredHighlightPaintSnapshot();
 
-        if (snapshot.BackgroundSpans.Length == 0 && highlightPaint.BackgroundSpans.Length == 0)
+        if (snapshot.BackgroundSpans.Length == 0 && highlightPaint.BackgroundSpans.Length == 0 && snapshot.Dots.Length == 0)
         {
             base.RenderTextLayout(context, origin);
             return;
@@ -528,6 +648,63 @@ public partial class MarkdownTextBlock : SelectableTextBlock
         }
 
         base.RenderTextLayout(context, origin);
+
+        if (snapshot.Dots.Length > 0)
+        {
+            using (context.PushTransform(Matrix.CreateTranslation(origin)))
+            {
+                DrawDots(context, snapshot.Dots, lines);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Each dot in the room its joiner reserved: at the reserved width's leading edge (the gap falls
+    /// between it and the text after), centred <see cref="DotInline.Elevation"/> above the baseline.
+    /// The brushes are read here rather than in the snapshot, so recolouring a dot costs a repaint and
+    /// nothing else.
+    /// </summary>
+    private void DrawDots(DrawingContext context, DotInlineSpan[] dots, TextLineGeometry[] lines)
+    {
+        foreach (var dot in dots)
+        {
+            var source = dot.Source;
+            if (source.Fill is null && source.Stroke is null)
+            {
+                continue;
+            }
+
+            var lineIndex = FindFirstLine(lines, dot.Start);
+            if (lineIndex >= lines.Length || lines[lineIndex].Start > dot.Start)
+            {
+                continue;
+            }
+
+            var line = lines[lineIndex];
+            var bounds = line.TextLine.GetTextBounds(dot.Start, dot.Length);
+            if (bounds.Count == 0)
+            {
+                continue;
+            }
+
+            var reserved = bounds[0].Rectangle;
+            var fontSize = source.FontSize;
+            var diameter = source.GetDiameter(fontSize);
+            if (diameter <= 0)
+            {
+                continue;
+            }
+
+            var rightToLeft = bounds[0].FlowDirection == FlowDirection.RightToLeft;
+            var centre = new Point(
+                rightToLeft ? reserved.Right - diameter / 2 : reserved.Left + diameter / 2,
+                line.Y + line.TextLine.Baseline - Math.Round(fontSize * source.Elevation));
+
+            var thickness = source.Stroke is null ? 0 : Math.Max(0, source.StrokeThickness);
+            var pen = thickness > 0 ? new Pen(source.Stroke, thickness) : null;
+            var radius = Math.Max(0, (diameter - thickness) / 2);
+            context.DrawEllipse(source.Fill, pen, centre, radius, radius);
+        }
     }
 
     private HighlightPaintSnapshot GetRegisteredHighlightPaintSnapshot()
@@ -857,7 +1034,7 @@ public partial class MarkdownTextBlock : SelectableTextBlock
 
         _paintSnapshot = textRuns is null ?
             TextPaintSnapshot.Empty :
-            TextPaintSnapshot.Create(textRuns, GetCodeInlineSpans(), FlowDirection, LetterSpacing, codeInlineShapes);
+            TextPaintSnapshot.Create(textRuns, GetCodeInlineSpans(), GetDotInlineSpans(), FlowDirection, LetterSpacing, codeInlineShapes);
         _paintSnapshotTextRuns = textRuns;
         _paintSnapshotDirty = false;
         return _paintSnapshot;
@@ -921,6 +1098,52 @@ public partial class MarkdownTextBlock : SelectableTextBlock
                 case InlineUIContainer:
                     // InlineUIContainer is represented by an object replacement character in
                     // the parent TextLayout. Its child remains a separate text layout.
+                    currentIndex += TextRun.DefaultTextSourceLength;
+                    break;
+            }
+        }
+    }
+
+    /// <summary>The dots in this block, in text order, with where each sits in its layout text.</summary>
+    private DotInlineSpan[] GetDotInlineSpans()
+    {
+        if (Inlines is not { Count: > 0 } inlines)
+        {
+            return [];
+        }
+
+        List<DotInlineSpan>? spans = null;
+        var currentIndex = 0;
+
+        foreach (var inline in inlines)
+        {
+            AppendInline(inline);
+        }
+
+        return spans is null ? [] : spans.ToArray();
+
+        void AppendInline(Inline inline)
+        {
+            switch (inline)
+            {
+                case DotInline dot:
+                    (spans ??= []).Add(new DotInlineSpan(currentIndex, dot.Text?.Length ?? 0, dot));
+                    currentIndex += dot.Text?.Length ?? 0;
+                    break;
+                case Run run:
+                    currentIndex += run.Text?.Length ?? 0;
+                    break;
+                case Span span:
+                    foreach (var childInline in span.Inlines)
+                    {
+                        AppendInline(childInline);
+                    }
+
+                    break;
+                case LineBreak:
+                    currentIndex += Environment.NewLine.Length;
+                    break;
+                case InlineUIContainer:
                     currentIndex += TextRun.DefaultTextSourceLength;
                     break;
             }
@@ -1041,6 +1264,11 @@ public partial class MarkdownTextBlock : SelectableTextBlock
         Thickness Padding,
         Thickness Margin
     )
+    {
+        public int End => Start + Length;
+    }
+
+    private readonly record struct DotInlineSpan(int Start, int Length, DotInline Source)
     {
         public int End => Start + Length;
     }
@@ -1240,27 +1468,35 @@ public partial class MarkdownTextBlock : SelectableTextBlock
 
     private sealed class TextPaintSnapshot
     {
-        public static readonly TextPaintSnapshot Empty = new([], []);
+        public static readonly TextPaintSnapshot Empty = new([], [], []);
 
         public TextPaintSpan[] BackgroundSpans { get; }
 
+        /// <summary>The dots that got their reserved width, and so are drawn. One the formatter could not
+        /// shape a width for is left out: drawn anyway, it would sit on the text after it.</summary>
+        public DotInlineSpan[] Dots { get; }
+
         private readonly CodeInlineLayout[] _codeInlineLayouts;
 
-        private TextPaintSnapshot(TextPaintSpan[] backgroundSpans, CodeInlineLayout[] codeInlineLayouts)
+        private TextPaintSnapshot(TextPaintSpan[] backgroundSpans, CodeInlineLayout[] codeInlineLayouts, DotInlineSpan[] dots)
         {
             BackgroundSpans = backgroundSpans;
             _codeInlineLayouts = codeInlineLayouts;
+            Dots = dots;
         }
 
         public static TextPaintSnapshot Create(
             IReadOnlyList<TextRun> textRuns,
             IReadOnlyList<CodeInlineSpan> codeInlineSpans,
+            IReadOnlyList<DotInlineSpan> dotInlineSpans,
             FlowDirection flowDirection,
             double letterSpacing,
             Dictionary<CodeInlineShapeKey, ShapedCodeInline?> shapeCache)
         {
             List<TextPaintSpan>? backgroundSpans = null;
             List<CodeInlineLayout>? codeInlineLayouts = null;
+            List<DotInlineSpan>? dots = null;
+            var dotIndex = 0;
             StringBuilder? codeText = null;
             TextRunProperties? codeProperties = null;
             CodeInlineSpan activeCodeInline = default;
@@ -1296,6 +1532,33 @@ public partial class MarkdownTextBlock : SelectableTextBlock
                     codeText = new StringBuilder(activeCodeInline.Length);
                     codeProperties = null;
                     codeTextValid = true;
+                }
+
+                while (dotIndex < dotInlineSpans.Count && dotInlineSpans[dotIndex].End <= runStart)
+                {
+                    dotIndex++;
+                }
+
+                if (dotIndex < dotInlineSpans.Count &&
+                    dotInlineSpans[dotIndex] is { } dot &&
+                    dot.Start == runStart &&
+                    dot.Length == runLength &&
+                    textRun is TextCharacters { Properties: { } dotProperties } dotCharacters &&
+                    dotCharacters.Text.Length == runLength &&
+                    CodeInlineLayout.TryCreateFixedWidth(
+                        dot.Start,
+                        dotCharacters.Text.ToString(),
+                        CreatePaintProperties(dotProperties, dotProperties.ForegroundBrush),
+                        flowDirection,
+                        letterSpacing,
+                        dot.Source.GetAdvance(dotProperties.FontRenderingEmSize),
+                        shapeCache,
+                        out var dotLayout))
+                {
+                    (codeInlineLayouts ??= []).Add(dotLayout);
+                    (dots ??= []).Add(dot);
+                    currentIndex = runEnd;
+                    continue;
                 }
 
                 var activeCode = hasActiveCodeInline ? activeCodeInline : default;
@@ -1368,11 +1631,18 @@ public partial class MarkdownTextBlock : SelectableTextBlock
 
             var builtBackgroundSpans = backgroundSpans is null ? Array.Empty<TextPaintSpan>() : backgroundSpans.ToArray();
             var builtCodeInlineLayouts = codeInlineLayouts is null ? Array.Empty<CodeInlineLayout>() : codeInlineLayouts.ToArray();
+            if (dots is not null)
+            {
+                // Dots and chips were collected side by side; the run lookup searches them by position.
+                Array.Sort(builtCodeInlineLayouts, static (a, b) => a.Start.CompareTo(b.Start));
+            }
+
             return builtBackgroundSpans.Length == 0 && builtCodeInlineLayouts.Length == 0 ?
                 Empty :
                 new TextPaintSnapshot(
                     builtBackgroundSpans,
-                    builtCodeInlineLayouts);
+                    builtCodeInlineLayouts,
+                    dots is null ? [] : dots.ToArray());
 
             void FinishCodeInline()
             {
@@ -1565,6 +1835,56 @@ public partial class MarkdownTextBlock : SelectableTextBlock
                 // A chip that cannot be pre-shaped is remembered as such, so the attempt is not
                 // repeated for it on every measure either.
                 shaped = TryShape(text, properties, flowDirection, letterSpacing, leftSpacing, rightSpacing);
+                cache[key] = shaped;
+            }
+
+            if (shaped is null)
+            {
+                layout = null;
+                return false;
+            }
+
+            layout = new CodeInlineLayout(start, shaped);
+            return true;
+        }
+
+        /// <summary>
+        /// The layout for a <see cref="DotInline"/>: its text shaped as usual, then given exactly
+        /// <paramref name="width"/> of advance — the first glyph carries all of it — so the dot's room
+        /// in the line does not depend on how the font draws the character holding its place.
+        /// </summary>
+        public static bool TryCreateFixedWidth(
+            int start,
+            string text,
+            TextRunProperties properties,
+            FlowDirection flowDirection,
+            double letterSpacing,
+            double width,
+            Dictionary<CodeInlineShapeKey, ShapedCodeInline?> cache,
+            [NotNullWhen(true)] out CodeInlineLayout? layout)
+        {
+            var key = new CodeInlineShapeKey(
+                text,
+                properties.Typeface,
+                properties.FontRenderingEmSize,
+                properties.TextDecorations,
+                properties.FontFeatures,
+                properties.CultureInfo,
+                properties.ForegroundBrush,
+                flowDirection,
+                letterSpacing,
+                0,
+                0,
+                width);
+
+            if (!cache.TryGetValue(key, out var shaped))
+            {
+                shaped = TryShape(text, properties, flowDirection, letterSpacing, 0, 0);
+                if (shaped is not null && !shaped.Runs.Any(run => run.TrySetFixedWidth(width)))
+                {
+                    shaped = null;
+                }
+
                 cache[key] = shaped;
             }
 
@@ -1796,7 +2116,8 @@ public partial class MarkdownTextBlock : SelectableTextBlock
         FlowDirection FlowDirection,
         double LetterSpacing,
         double LeftSpacing,
-        double RightSpacing);
+        double RightSpacing,
+        double FixedWidth = -1);
 
     private sealed class ShapedCodeInlineRun
     {
@@ -1836,6 +2157,24 @@ public partial class MarkdownTextBlock : SelectableTextBlock
         public void AddVisualLeadingAdvance(double advance) => AddAdvance(advance, IsLeftToRight);
 
         public void AddVisualTrailingAdvance(double advance) => AddAdvance(advance, !IsLeftToRight);
+
+        /// <summary>Give the run exactly <paramref name="width"/> of advance, all on its first glyph, and
+        /// draw nothing of its own offset. False when it has no glyph to carry it.</summary>
+        public bool TrySetFixedWidth(double width)
+        {
+            if (_glyphs.Length == 0)
+            {
+                return false;
+            }
+
+            for (var index = 0; index < _glyphs.Length; index++)
+            {
+                var glyph = _glyphs[index];
+                _glyphs[index] = new GlyphInfo(glyph.GlyphIndex, glyph.GlyphCluster, index == 0 ? width : 0, default);
+            }
+
+            return true;
+        }
 
         public ShapedTextRun CreateRun(string sourceText, int sourceIndex, int length, TextRunProperties runProperties)
         {
@@ -2273,6 +2612,25 @@ public partial class MarkdownTextBlock : SelectableTextBlock
     private void UpdatePseudoClass()
     {
         PseudoClasses.Set(":pointerover-link", pointerLink is not null);
+        UpdateLinkTip();
+    }
+
+    private bool showingLinkTip;
+
+    /// <summary>The hovered link's <see cref="Link.Tip"/>, as this block's tooltip. A block's own tooltip,
+    /// set by anyone else, is left alone unless a link tip replaced it.</summary>
+    private void UpdateLinkTip()
+    {
+        if (pointerLink?.Tip is { } tip)
+        {
+            if (!showingLinkTip || !Equals(ToolTip.GetTip(this), tip)) ToolTip.SetTip(this, tip);
+            showingLinkTip = true;
+        }
+        else if (showingLinkTip)
+        {
+            ClearValue(ToolTip.TipProperty);
+            showingLinkTip = false;
+        }
     }
 }
 

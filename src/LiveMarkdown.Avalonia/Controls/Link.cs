@@ -82,6 +82,23 @@ public class Link : Span
         }
     }
 
+    /// <summary>
+    /// Defines the <see cref="Tip"/> property.
+    /// </summary>
+    public static readonly StyledProperty<object?> TipProperty =
+        AvaloniaProperty.Register<Link, object?>(nameof(Tip));
+
+    /// <summary>
+    /// Gets or sets the tooltip shown while the pointer is over the link. A link is an inline, not a
+    /// control, so it cannot carry a <see cref="ToolTip"/> itself: the containing
+    /// <see cref="MarkdownTextBlock"/> shows this one as its own while the pointer is over the link.
+    /// </summary>
+    public object? Tip
+    {
+        get => GetValue(TipProperty);
+        set => SetValue(TipProperty, value);
+    }
+
     internal string Tag { get; }
 
     private static long nextTagId;

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 using Avalonia;
@@ -145,6 +146,89 @@ public class RasterEqualityTests
             CancellationToken.None);
 
         Assert.That(result.Differing, Is.Zero, $"{result.Differing} of {result.Total} bytes differ between streamed and whole");
+    }
+
+    [Test]
+    public async Task ADocumentSplicedByTheProducerRendersLikeAWholeOne()
+    {
+        // The other streaming test parses the whole source on every append. This one goes through the
+        // real producer, which parses only the trailing region and splices it onto the document it
+        // already had -- so the picture here is drawn from blocks parsed at a dozen different times,
+        // against one drawn from a single parse. Anything the splice gets wrong about a span, a
+        // heading identifier or the order of the children shows up as ink in the wrong place.
+        var result = await session.Dispatch(
+            () =>
+            {
+                var pieces = new[]
+                {
+                    "# A streamed document\n\n",
+                    "First paragraph, with **bold** and `code` in it.\n\n",
+                    "- one item\n",
+                    "- another item\n",
+                    "\n```csharp\nvar value = Compute(1);\n```\n\n",
+                    "## A later heading\n\n",
+                    "Closing paragraph, longer than the one before it.\n\n",
+                };
+
+                var streamed = RenderThroughProducer(pieces, out var splices);
+                var whole = Render(string.Concat(pieces));
+
+                var differing = 0;
+                for (var i = 0; i < streamed.Length; i++)
+                {
+                    if (streamed[i] != whole[i]) differing++;
+                }
+
+                return (Differing: differing, Total: streamed.Length, Splices: splices);
+            },
+            CancellationToken.None);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(result.Splices, Is.GreaterThan(0), "sanity: the producer actually spliced");
+            Assert.That(
+                result.Differing,
+                Is.Zero,
+                $"{result.Differing} of {result.Total} bytes differ between spliced and whole");
+        });
+    }
+
+    /// <summary>Renders the pieces by feeding them to a real builder and producer, one at a time.</summary>
+    private static byte[] RenderThroughProducer(string[] pieces, out int splices)
+    {
+        var builder = new ObservableStringBuilder();
+        var producer = new MarkdownUpdateProducer { MarkdownBuilder = builder };
+        var renderer = new MarkdownRenderer { UpdateProducer = producer };
+        var window = new Window { Width = Width, Height = Height, Background = Brushes.White, Content = renderer };
+        try
+        {
+            window.Show();
+            window.UpdateLayout();
+
+            foreach (var piece in pieces)
+            {
+                builder.Append(piece);
+
+                var deadline = Stopwatch.GetTimestamp() + (Stopwatch.Frequency * 10);
+                while (renderer.DocumentUpdate is not { } update || update.Version < builder.Version)
+                {
+                    if (Stopwatch.GetTimestamp() > deadline) throw new TimeoutException("the producer never caught up");
+                    Dispatcher.UIThread.RunJobs();
+                    window.UpdateLayout();
+                    Thread.Sleep(0);
+                }
+
+                window.UpdateLayout();
+            }
+
+            Dispatcher.UIThread.RunJobs();
+            splices = producer.SpliceCount;
+            return Capture(renderer);
+        }
+        finally
+        {
+            window.Close();
+        }
     }
 
     /// <summary>Renders the markdown by appending it a few characters at a time, as a host streaming would.</summary>

@@ -548,7 +548,7 @@ public class RenderCostTests
         });
     }
 
-    /// <summary>A realised renderer with a foreground search running, fed one append at a time.</summary>
+    /// <summary>A realised renderer, fed one append at a time, optionally with a search running.</summary>
     private sealed class SearchHost : IDisposable
     {
         private readonly Window window;
@@ -558,7 +558,7 @@ public class RenderCostTests
 
         public MarkdownRenderer Renderer { get; }
 
-        public SearchHost(string query)
+        public SearchHost(string? query)
         {
             Renderer = new MarkdownRenderer();
             var styles = new TextHighlightStyles();
@@ -570,10 +570,25 @@ public class RenderCostTests
             window = new Window { Width = 600, Height = 400, Content = Renderer };
             window.Show();
             window.UpdateLayout();
-            Renderer.ApplyTextSearch(query);
+            if (query is not null) Renderer.ApplyTextSearch(query);
         }
 
         public void Append(string text)
+        {
+            Post(text);
+            Pump();
+        }
+
+        /// <summary>Bytes the layout following an append allocates, with the parse left outside.</summary>
+        public long AppendedLayoutBytes(string text)
+        {
+            Post(text);
+            var before = GC.GetAllocatedBytesForCurrentThread();
+            Pump();
+            return GC.GetAllocatedBytesForCurrentThread() - before;
+        }
+
+        private void Post(string text)
         {
             var startIndex = source.Length;
             source.Append(text);
@@ -586,6 +601,7 @@ public class RenderCostTests
             source.Clear();
             source.Append(text);
             Commit(new ObservableStringBuilderChangedEventArgs(0, Math.Max(oldLength, text.Length), source.Length, ++version));
+            Pump();
         }
 
         private void Commit(ObservableStringBuilderChangedEventArgs change)
@@ -597,7 +613,10 @@ public class RenderCostTests
 
             Renderer.DocumentUpdate = update;
             previous = update;
+        }
 
+        private void Pump()
+        {
             Dispatcher.UIThread.RunJobs();
             window.UpdateLayout();
         }
@@ -605,6 +624,95 @@ public class RenderCostTests
         public MarkdownTextBlock[] Blocks() => [.. Renderer.GetVisualDescendants().OfType<MarkdownTextBlock>()];
 
         public void Dispose() => window.Close();
+    }
+
+    [Test]
+    public async Task Laying_out_an_append_costs_the_same_in_a_long_document_as_in_a_short_one()
+    {
+        // Every completed layout used to walk the renderer for its text blocks and copy each one's
+        // layout text into a MarkdownTextProjection, whether or not any host had ever read the
+        // property -- so the cheapest thing a keystroke could cost grew with the whole document
+        // rather than the block it changed. Nothing reads the projection here, so nothing should
+        // build one, and what a layout costs should stop at the paragraph that changed.
+        var result = await session.Dispatch(
+            () => (Short: LayoutCost(blocks: 100), Long: LayoutCost(blocks: 800)),
+            CancellationToken.None);
+
+        Assert.That(
+            result.Long,
+            Is.LessThan(result.Short * 1.4),
+            $"laying out an append cost {result.Long / 1024} KB in a long document against "
+                + $"{result.Short / 1024} KB in a short one");
+    }
+
+    /// <summary>
+    /// An active search re-runs on every completed layout, over every block the renderer owns, because a
+    /// layout is the only point at which the text is settled. Streaming a token changes ONE block, so
+    /// re-matching the rest re-derives an answer that cannot have changed.
+    /// </summary>
+    /// <remarks>Counted rather than weighed on purpose. The allocation this saves is real — 254 KB per
+    /// append into a 400-paragraph document, against 39 KB for the same append with no search — but a
+    /// ceiling would pass again the day the matcher gets cheaper while still running everywhere. What is
+    /// actually being asserted is that the work is proportional to what CHANGED, and invocations say that
+    /// exactly.</remarks>
+    [Test]
+    public async Task An_active_search_only_re_matches_the_blocks_that_changed()
+    {
+        var counted = await session.Dispatch(
+            () =>
+            {
+                using var host = new SearchHost(query: null);
+                for (var i = 0; i < 100; i++)
+                {
+                    host.Append($"Paragraph {i} of the document, with enough words in it to wrap.\n\n");
+                }
+
+                var calls = 0;
+                host.Renderer.ApplyTextSearch((_, _) =>
+                {
+                    calls++;
+                    return [];
+                });
+
+                // Installing the search matches the whole document once, which it must.
+                var firstPass = calls;
+
+                calls = 0;
+                host.Append("One more paragraph, with a comparable number of words in it.\n\n");
+                return (FirstPass: firstPass, AfterOneAppend: calls);
+            },
+            CancellationToken.None);
+
+        Assert.That(counted.FirstPass, Is.GreaterThan(50), "installing a search must match the whole document");
+        Assert.That(
+            counted.AfterOneAppend,
+            Is.LessThan(5),
+            $"appending one paragraph re-matched {counted.AfterOneAppend} blocks, having matched "
+                + $"{counted.FirstPass} when the search was installed");
+    }
+
+    /// <summary>Bytes the layout after one append allocates in a document of the given size.</summary>
+    private static long LayoutCost(int blocks)
+    {
+        using var host = new SearchHost(query: null);
+        for (var i = 0; i < blocks; i++)
+        {
+            host.Append($"Paragraph {i} of the document, with enough words in it to wrap.\n\n");
+        }
+
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+
+        const int iterations = 8;
+        long allocated = 0;
+        for (var i = 0; i < iterations; i++)
+        {
+            allocated += host.AppendedLayoutBytes(
+                $"Appended paragraph {i} with a comparable number of words in it.\n\n");
+        }
+
+        return allocated / iterations;
     }
 
     [Test]
@@ -623,6 +731,73 @@ public class RenderCostTests
             Is.LessThan(result.Short * 1.4),
             $"appending to a long block cost {result.Long / 1024} KB against {result.Short / 1024} KB for a short one");
     }
+
+    [Test]
+    public void Appending_to_a_long_paragraph_costs_the_node_sync_what_a_short_one_does()
+    {
+        // Prose streams a sentence at a time into ONE paragraph, so the block an append lands in
+        // grows without bound. Laying it out again is Avalonia's cost and it is linear in the
+        // paragraph -- 334 KB an append at three thousand characters, 1,459 KB at ten thousand, and a
+        // bare SelectableTextBlock behaves the same way. What this pins is the half that is OURS:
+        // the node sync must keep costing the sentence rather than the paragraph.
+        var result = (Short: SentenceAppendCost(existing: 10), Long: SentenceAppendCost(existing: 200));
+
+        Assert.That(
+            result.Long,
+            Is.LessThan(result.Short * 1.4),
+            $"appending to a long paragraph cost {result.Long / 1024} KB of node sync against "
+                + $"{result.Short / 1024} KB for a short one");
+    }
+
+    /// <summary>Bytes the node sync allocates for one sentence appended to a paragraph of some length.</summary>
+    private static long SentenceAppendCost(int existing)
+    {
+        var documentNode = new DocumentNode(new MarkdownRenderer());
+        var source = new StringBuilder();
+        long version = 0;
+
+        void Commit(string added)
+        {
+            var startIndex = source.Length - added.Length;
+            var change = new ObservableStringBuilderChangedEventArgs(startIndex, added.Length, source.Length, ++version);
+            documentNode.Update(
+                documentNode,
+                Markdown.Parse(source.ToString(), MarkdownUpdateProducer.DefaultPipeline),
+                change,
+                CancellationToken.None);
+        }
+
+        for (var i = 0; i < existing; i++)
+        {
+            var sentence = ProseSentence(i);
+            source.Append(sentence);
+            Commit(sentence);
+        }
+
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+
+        const int iterations = 8;
+        long allocated = 0;
+        for (var i = 0; i < iterations; i++)
+        {
+            var sentence = ProseSentence(existing + i);
+            source.Append(sentence);
+            var startIndex = source.Length - sentence.Length;
+            var change = new ObservableStringBuilderChangedEventArgs(startIndex, sentence.Length, source.Length, ++version);
+            var document = Markdown.Parse(source.ToString(), MarkdownUpdateProducer.DefaultPipeline);
+
+            var before = GC.GetAllocatedBytesForCurrentThread();
+            documentNode.Update(documentNode, document, change, CancellationToken.None);
+            allocated += GC.GetAllocatedBytesForCurrentThread() - before;
+        }
+
+        return allocated / iterations;
+    }
+
+    private static string ProseSentence(int i) =>
+        $"Sentence {i} of the reply, with **bold** and `code` in it, long enough to matter. ";
 
     /// <summary>Bytes the node sync allocates for one line appended to a block that already has some.</summary>
     private static long AppendCost(int existing)

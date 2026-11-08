@@ -178,6 +178,24 @@ public class ObservableStringBuilder : INotifyPropertyChanged
     public ObservableStringBuilderSnapshot CaptureSnapshot() => new(stringBuilder.ToString(), Version);
 
     /// <summary>
+    /// Captures the text committed through this builder from <paramref name="startIndex"/> onwards,
+    /// together with its matching version.
+    /// </summary>
+    /// <param name="startIndex">The offset the returned text starts at.</param>
+    /// <remarks>
+    /// The producer parses only the trailing region of a document it has already parsed, and copying
+    /// the whole source to reach it is the single largest allocation a keystroke makes once a
+    /// document is long. The same note about reading the base builder directly applies as for
+    /// <see cref="CaptureSnapshot()"/>.
+    /// </remarks>
+    public ObservableStringBuilderSnapshot CaptureSnapshot(int startIndex)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(startIndex);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(startIndex, stringBuilder.Length);
+        return new(stringBuilder.ToString(startIndex, stringBuilder.Length - startIndex), Version);
+    }
+
+    /// <summary>
     /// Raises the <see cref="PropertyChanged"/> event for a property.
     /// </summary>
     /// <param name="propertyName">The changed property name.</param>

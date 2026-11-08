@@ -6,7 +6,7 @@ using Markdig.Extensions.Tables;
 namespace LiveMarkdown.Avalonia;
 
 /// <summary>
-/// Renders a Markdown table in a horizontally scrollable container.
+/// Renders a Markdown table, wrapped to the available width and horizontally scrollable when it still cannot fit.
 /// </summary>
 public class TableNode : BlockNode<Table>
 {
@@ -24,7 +24,7 @@ public class TableNode : BlockNode<Table>
     {
         var container = new MarkdownTableGrid();
         proxy = new MarkdownRenderer.BlocksProxy(container.Children);
-        Control = new ScrollViewer
+        Control = new MarkdownTableScrollViewer(container)
         {
             Classes = { "Table" },
             HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,

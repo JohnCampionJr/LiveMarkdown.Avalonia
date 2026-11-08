@@ -1,4 +1,4 @@
-using Avalonia.Controls.Documents;
+﻿using Avalonia.Controls.Documents;
 using Avalonia.Media;
 using NUnit.Framework;
 using TextMateSharp.Themes;
@@ -10,7 +10,7 @@ namespace LiveMarkdown.Avalonia.Tests;
 public class SyntaxHighlightingTests
 {
     [Test]
-    public void ColorTheme_RemainsTheFallbackWhenCustomThemeNameIsNotSet()
+    public Task ColorTheme_RemainsTheFallbackWhenCustomThemeNameIsNotSet() => OnSession(() =>
     {
         var customTheme = new TestRawTheme("#123456");
         const string themeName = "LiveMarkdown.Tests.Fallback";
@@ -27,10 +27,10 @@ public class SyntaxHighlightingTests
         {
             SyntaxHighlighting.UnregisterCustomTheme(themeName);
         }
-    }
+    });
 
     [Test]
-    public void CustomThemeName_UsesRegisteredThemeAndRehighlightsWhenChanged()
+    public Task CustomThemeName_UsesRegisteredThemeAndRehighlightsWhenChanged() => OnSession(() =>
     {
         const string firstThemeName = "LiveMarkdown.Tests.First";
         const string secondThemeName = "LiveMarkdown.Tests.Second";
@@ -52,10 +52,10 @@ public class SyntaxHighlightingTests
             SyntaxHighlighting.UnregisterCustomTheme(firstThemeName);
             SyntaxHighlighting.UnregisterCustomTheme(secondThemeName);
         }
-    }
+    });
 
     [Test]
-    public void MissingCustomThemeName_FallsBackToColorTheme()
+    public Task MissingCustomThemeName_FallsBackToColorTheme() => OnSession(() =>
     {
         var customTheme = new TestRawTheme("#123456");
         const string themeName = "LiveMarkdown.Tests.Missing";
@@ -72,10 +72,10 @@ public class SyntaxHighlightingTests
         {
             SyntaxHighlighting.UnregisterCustomTheme(themeName);
         }
-    }
+    });
 
     [Test]
-    public void RegisteringTheSameNameReplacesTheCachedThemeAndParsesOnce()
+    public Task RegisteringTheSameNameReplacesTheCachedThemeAndParsesOnce() => OnSession(() =>
     {
         const string themeName = "LiveMarkdown.Tests.Replaced";
         var firstTheme = new TestRawTheme("#123456");
@@ -102,12 +102,12 @@ public class SyntaxHighlightingTests
         {
             SyntaxHighlighting.UnregisterCustomTheme(themeName);
         }
-    }
+    });
 
     // ---------------------------------------------------------------- run merging
 
     [Test]
-    public void AdjacentRunsOfALineNeverShareTheSameStyle()
+    public Task AdjacentRunsOfALineNeverShareTheSameStyle() => OnSession(() =>
     {
         // The invariant behind emitting one Run per styled group rather than one per token: if two
         // neighbours agree on everything the theme sets, the boundary between them is invisible and
@@ -139,10 +139,10 @@ public class SyntaxHighlightingTests
                     $"runs '{previous.Text}' and '{current.Text}' look identical and should have been one run");
             }
         }
-    }
+    });
 
     [Test]
-    public void MergingRunsKeepsTheLineTextExactly()
+    public Task MergingRunsKeepsTheLineTextExactly() => OnSession(() =>
     {
         const string code = "public static int Add(int first, int second) => first + second;";
         var codeBlock = new CodeBlock { Language = "csharp", Code = code };
@@ -150,10 +150,10 @@ public class SyntaxHighlightingTests
         var rendered = string.Concat(EnumerateRuns(codeBlock.Inlines).Select(run => run.Text));
 
         Assert.That(rendered, Is.EqualTo(code), "nothing dropped, duplicated or reordered by merging");
-    }
+    });
 
     [Test]
-    public void AMultiLineBlockKeepsOneInlinePerLine()
+    public Task AMultiLineBlockKeepsOneInlinePerLine() => OnSession(() =>
     {
         // Merging happens WITHIN a line. It must never reach across the line break, which is a
         // separate inline and the thing that puts the next line on its own row.
@@ -168,7 +168,15 @@ public class SyntaxHighlightingTests
 
         Assert.That(lines, Is.EqualTo(3));
         Assert.That(breaks, Is.EqualTo(2));
-    }
+    });
+
+    /// <summary>
+    /// Builds and inspects the controls on the shared headless session's thread. Built on NUnit's thread they
+    /// queue work on a dispatcher the session later drains on its own thread, and a throw there ends the
+    /// session for every test after this class.
+    /// </summary>
+    private static Task OnSession(Action body) =>
+        HeadlessSession.Current.Dispatch(body, new CancellationTokenSource(TimeSpan.FromSeconds(10)).Token);
 
     private static CodeBlock CreateCodeBlock(string? customThemeName)
     {

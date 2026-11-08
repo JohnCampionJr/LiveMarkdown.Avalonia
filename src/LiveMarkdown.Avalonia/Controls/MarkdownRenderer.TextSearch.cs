@@ -50,9 +50,30 @@ partial class MarkdownRenderer
     /// <summary>
     /// Gets the searchable text buffers produced by the most recently committed render.
     /// </summary>
+    /// <remarks>
+    /// Built on demand. Producing it walks every text block in the renderer and takes each one's
+    /// layout text, which on a document of fifteen hundred blocks costs about 90 KB on the UI thread
+    /// after every layout -- and every keystroke into a streaming document causes a layout. Reading
+    /// this property, or binding to it, is what tells the renderer somebody wants it; from then on it
+    /// is kept current exactly as before. Either way it reads null until a layout has run for the
+    /// current document version, which is the contract it had when it was built eagerly.
+    /// </remarks>
     public MarkdownTextProjection? RenderedTextProjection
     {
-        get;
+        get
+        {
+            _renderedTextProjectionWanted = true;
+
+            // A version has been laid out but nothing was built for it, because until this read
+            // nobody had asked for one.
+            if (field is null && _renderedTextStateVersion is { } version)
+            {
+                RenderedTextProjection = CreateRenderedTextProjection(version, GetTextBlocksInRenderer());
+            }
+
+            return field;
+        }
+
         private set => SetAndRaise(RenderedTextProjectionProperty, ref field, value);
     }
 
@@ -75,11 +96,23 @@ partial class MarkdownRenderer
     } = [];
 
     private TextSearchMatcher? _textSearchMatcher;
+
+    /// <summary>Bumped every time the active matcher is replaced or cleared, and carried in each block's
+    /// <see cref="MarkdownTextBlock.SearchMemo"/> so that installing a search invalidates every memo by
+    /// construction — including a caller that re-applies the SAME delegate instance after changing what it
+    /// captured, which delegate identity alone would not catch.</summary>
+    private int _textSearchGeneration;
     private string _textSearchHighlightName = DefaultTextSearchHighlightName;
     private string? _textSearchAppliedHighlightName;
     private int _textSearchPriority;
     private HashSet<MarkdownTextBlock>? _textSearchAppliedBlocks;
     private long? _pendingRenderedTextStateVersion;
+
+    /// <summary>The document version of the last completed layout, or null before the first one.</summary>
+    private long? _renderedTextStateVersion;
+
+    /// <summary>Whether anything has ever read <see cref="RenderedTextProjection"/>.</summary>
+    private bool _renderedTextProjectionWanted;
 
     /// <summary>
     /// Finds and paints all matches produced by a caller-supplied matcher.
@@ -97,7 +130,7 @@ partial class MarkdownRenderer
         ArgumentNullException.ThrowIfNull(matcher);
         ArgumentException.ThrowIfNullOrEmpty(highlightName);
 
-        _textSearchMatcher = matcher;
+        SetTextSearchMatcher(matcher);
         _textSearchHighlightName = highlightName;
         _textSearchPriority = priority;
         ApplyTextSearchCore(GetTextBlocksInRenderer());
@@ -162,8 +195,14 @@ partial class MarkdownRenderer
     /// </summary>
     public void ClearTextSearch()
     {
-        _textSearchMatcher = null;
+        SetTextSearchMatcher(null);
         ClearAppliedTextSearch();
+    }
+
+    private void SetTextSearchMatcher(TextSearchMatcher? matcher)
+    {
+        _textSearchMatcher = matcher;
+        _textSearchGeneration++;
     }
 
     private void ClearAppliedTextSearch()
@@ -209,9 +248,17 @@ partial class MarkdownRenderer
         if (_pendingRenderedTextStateVersion is not { } sourceVersion) return;
 
         _pendingRenderedTextStateVersion = null;
+        _renderedTextStateVersion = sourceVersion;
+
+        // Both of the things below need the block list, and collecting it is itself the larger half
+        // of the cost, so it is only collected when one of them is actually wanted.
+        var wantsProjection = _renderedTextProjectionWanted;
+        var wantsSearch = _textSearchMatcher is not null;
+        if (!wantsProjection && !wantsSearch) return;
+
         var blocks = GetTextBlocksInRenderer();
-        RenderedTextProjection = CreateRenderedTextProjection(sourceVersion, blocks);
-        ApplyTextSearchCore(blocks);
+        if (wantsProjection) RenderedTextProjection = CreateRenderedTextProjection(sourceVersion, blocks);
+        if (wantsSearch) ApplyTextSearchCore(blocks);
     }
 
     private static MarkdownTextProjection CreateRenderedTextProjection(long sourceVersion, MarkdownTextBlock[] blocks)
@@ -239,7 +286,24 @@ partial class MarkdownRenderer
         foreach (var block in blocks)
         {
             var text = block.LayoutText;
-            var ranges = NormalizeRanges(matcher(block, text), text.Length);
+
+            // Re-match only the blocks that can have changed. This runs on every completed layout over
+            // every block in the renderer, and streaming a token changes exactly one of them — see
+            // MarkdownTextBlock.SearchMemo for why the LayoutText instance is a sound key and which way
+            // a miss fails.
+            IReadOnlyList<TextHighlightRange> ranges;
+            if (block.SearchMemo is { } memo &&
+                memo.Generation == _textSearchGeneration &&
+                ReferenceEquals(memo.Text, text))
+            {
+                ranges = memo.Ranges;
+            }
+            else
+            {
+                ranges = NormalizeRanges(matcher(block, text), text.Length);
+                block.SearchMemo = (_textSearchGeneration, text, ranges);
+            }
+
             if (ranges.Count == 0)
             {
                 continue;
@@ -286,7 +350,7 @@ partial class MarkdownRenderer
         string highlightName,
         int priority)
     {
-        _textSearchMatcher = (block, text) => matcher(block, text, state);
+        SetTextSearchMatcher((block, text) => matcher(block, text, state));
         _textSearchHighlightName = highlightName;
         _textSearchPriority = priority;
         ApplyTextSearchCore(GetTextBlocksInRenderer());
