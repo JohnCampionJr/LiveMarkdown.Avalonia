@@ -99,13 +99,14 @@ public class CodeBlockNode : BlockNode<Markdig.Syntax.CodeBlock>
             var line = codeBlock.Lines.Lines[lineIndex];
             var slice = line.Slice;
             var position = line.Position + (sourceOffset ?? 0);
+            var sliceOffset = OpenFenceAppend.SliceOffset(codeBlock, lineIndex, sourceOffset ?? 0);
             if (linePositions.Count > 0 && position <= linePositions[^1]) orderedLinePositions = false;
             linePositions.Add(position);
 
             // A line the change cannot have reached keeps what it has, which for a streaming block
             // is every line but the last. The control decides which text block holds it.
             if (!structuralChange && lineIndex < _codeBlock.LineCount &&
-                (slice.End + (sourceOffset ?? 0) < change.StartIndex || change.StartIndex + change.Length <= slice.Start + (sourceOffset ?? 0))) continue;
+                (slice.End + sliceOffset < change.StartIndex || change.StartIndex + change.Length <= slice.Start + sliceOffset)) continue;
 
             _codeBlock.SetLine(lineIndex, slice.ToString());
         }
@@ -120,7 +121,8 @@ public class CodeBlockNode : BlockNode<Markdig.Syntax.CodeBlock>
             var last = codeBlock.Lines.Lines[lineCount - 1];
             var newlineLength = last.NewLine == NewLine.CarriageReturnLineFeed ? 2 : last.NewLine == NewLine.None ? 0 : 1;
             if (newlineLength > 0)
-                appendBoundary = Math.Max(last.Position - 1, last.Slice.End) + (sourceOffset ?? 0) + newlineLength + 1;
+                appendBoundary = Math.Max(last.Position + (sourceOffset ?? 0) - 1,
+                    last.Slice.End + OpenFenceAppend.SliceOffset(codeBlock, lineCount - 1, sourceOffset ?? 0)) + newlineLength + 1;
         }
 
         // Highlighting only works for closed FencedCodeBlock with Info

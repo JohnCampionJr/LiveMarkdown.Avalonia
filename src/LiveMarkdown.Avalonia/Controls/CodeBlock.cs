@@ -238,9 +238,10 @@ public class CodeBlock : TemplatedControl
     /// <summary>Gets the text blocks this code is laid out in, in order.</summary>
     public IReadOnlyList<MarkdownTextBlock> CodeTextBlocks
     {
-        get { mutableTextExposed = true; return chunks; }
+        get => readOnlyChunks ??= chunks.AsReadOnly();
     }
 
+    private IReadOnlyList<MarkdownTextBlock>? readOnlyChunks;
     private readonly List<MarkdownTextBlock> chunks = [];
     private readonly List<InlineCollection> chunkInlineCollections = [];
     private int firstDirtyContentLine;
@@ -288,6 +289,7 @@ public class CodeBlock : TemplatedControl
     /// <summary>Creates text blocks up to and including <paramref name="index"/>, and returns that one.</summary>
     private MarkdownTextBlock EnsureChunk(int index)
     {
+        using var ownEdit = SuspendSyntaxHighlighting();
         while (chunks.Count <= index)
         {
             var block = new MarkdownTextBlock
@@ -308,6 +310,7 @@ public class CodeBlock : TemplatedControl
             block.Bind(TemplatedControl.FontFamilyProperty, this.GetObservable(FontFamilyProperty));
             block.Bind(TextBlock.TextWrappingProperty, this.GetObservable(TextWrappingProperty));
             block.Inlines!.CollectionChanged += HandleInlinesChanged;
+            block.InlineContentInvalidated += HandleChunkContentInvalidated;
 
             chunks.Add(block);
             chunkInlineCollections.Add(block.Inlines);
@@ -319,6 +322,7 @@ public class CodeBlock : TemplatedControl
 
     private void AttachChunk(int index)
     {
+        using var ownEdit = SuspendSyntaxHighlighting();
         if (linesPanel is not { } panel) return;
         var block = chunks[index];
         if (DeferOffscreenChunkStyling && index > 0 && block.Inlines is { } inlines && CanDefer(inlines))
@@ -366,6 +370,7 @@ public class CodeBlock : TemplatedControl
 
     private void RestoreChunkStyling(MarkdownTextBlock block)
     {
+        using var ownEdit = SuspendSyntaxHighlighting();
         if (deferredInlines?.Remove(block, out var inlines) != true) return;
         block.EffectiveViewportChanged -= OnDeferredChunkViewportChanged;
         var start = block.SelectionStart;
@@ -449,6 +454,7 @@ public class CodeBlock : TemplatedControl
         while (chunks.Count > neededChunks)
         {
             var block = chunks[^1];
+            block.InlineContentInvalidated -= HandleChunkContentInvalidated;
             // This is the subscribed collection, which may differ from the block's current
             // collection when it was replaced externally while highlighting was disabled.
             chunkInlineCollections[^1].CollectionChanged -= HandleInlinesChanged;
@@ -496,7 +502,7 @@ public class CodeBlock : TemplatedControl
     /// </summary>
     public MarkdownTextBlock? CodeTextBlock
     {
-        get { mutableTextExposed = true; return chunks.Count > 0 ? chunks[0] : null; }
+        get => chunks.Count > 0 ? chunks[0] : null;
     }
 
     /// <summary>
@@ -564,11 +570,17 @@ public class CodeBlock : TemplatedControl
     private void HandleInlinesChanged(object? sender, NotifyCollectionChangedEventArgs e)
     {
         if (suspendedHighlightCount > 0 || isApplyingSyntaxHighlighting) return;
+        HandleChunkContentInvalidated();
+        if (AutoSyntaxHighlight) HighlightSyntax();
+    }
+
+    private void HandleChunkContentInvalidated()
+    {
+        if (suspendedHighlightCount > 0 || isApplyingSyntaxHighlighting) return;
         // Externally edited collections no longer have authoritative line metadata. Keep the
         // safe text-comparison path for this mutable view, including when highlighting is disabled.
         mutableTextExposed = true;
         firstDirtyContentLine = firstDirtyFormattingLine = 0;
-        if (AutoSyntaxHighlight) HighlightSyntax();
     }
 
     /// <summary>

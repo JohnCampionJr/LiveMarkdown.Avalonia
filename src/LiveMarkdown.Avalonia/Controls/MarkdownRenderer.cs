@@ -4,6 +4,7 @@
 
 using System.Windows.Input;
 using Avalonia;
+using Avalonia.VisualTree;
 using Avalonia.Controls;
 using Avalonia.Controls.Metadata;
 using Avalonia.Interactivity;
@@ -213,6 +214,8 @@ public partial class MarkdownRenderer : Control
         Dispatcher.VerifyAccess();
 
         var previous = documentUpdate;
+        if (value is not MarkdownDocumentUpdate.Incremental incrementalBlocks || previous is null ||
+            !incrementalBlocks.Follows(previous) || !this.IsAttachedToVisualTree()) collectedTextBlocks = [];
         if (!SetAndRaise(DocumentUpdateProperty, ref documentUpdate, value)) return;
 
         using var capture = MarkdownRenderDiagnostics.Begin(
@@ -247,6 +250,7 @@ public partial class MarkdownRenderer : Control
         else
         {
             documentNode.Clear();
+            collectedTextBlocks = [];
         }
 
         RenderedTextProjection = null;

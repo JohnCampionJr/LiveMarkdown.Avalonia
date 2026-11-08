@@ -1,4 +1,5 @@
 using Avalonia;
+using Avalonia.VisualTree;
 using Markdig;
 
 namespace LiveMarkdown.Avalonia;
@@ -56,33 +57,34 @@ partial class MarkdownRenderer : IObserver<MarkdownDocumentUpdate>
     /// </summary>
     /// <remarks>
     /// The default producer is allocated lazily. The renderer owns only its subscription to the
-    /// producer and releases that subscription when the property changes.
+    /// producer and releases that subscription when the property changes or the renderer detaches.
+    /// Reattachment subscribes again and replays the latest state. Initial off-tree rendering remains supported.
     /// </remarks>
     public IMarkdownUpdateProducer UpdateProducer
     {
         get
         {
             Dispatcher.VerifyAccess();
-            if (field is not null) return field;
+            if (updateProducer is not null) return updateProducer;
 
             var producer = new MarkdownUpdateProducer();
-            field = producer;
-            updateProducerSubscription = producer.Subscribe(this);
+            updateProducer = producer;
+            EnsureUpdateProducerSubscription();
             return producer;
         }
         set
         {
             Dispatcher.VerifyAccess();
             ArgumentNullException.ThrowIfNull(value);
-            if (ReferenceEquals(field, value)) return;
+            if (ReferenceEquals(updateProducer, value)) return;
 
-            var oldProducer = field;
+            var oldProducer = updateProducer;
             var oldMarkdownBuilder = oldProducer?.MarkdownBuilder;
 
             updateProducerSubscription?.Dispose();
             updateProducerSubscription = null;
-            SetAndRaise(UpdateProducerProperty, ref field!, value);
-            updateProducerSubscription = value.Subscribe(this);
+            SetAndRaise(UpdateProducerProperty, ref updateProducer!, value);
+            EnsureUpdateProducerSubscription();
 
             var newMarkdownBuilder = value.MarkdownBuilder;
             if (!ReferenceEquals(oldMarkdownBuilder, newMarkdownBuilder))
@@ -92,7 +94,36 @@ partial class MarkdownRenderer : IObserver<MarkdownDocumentUpdate>
         }
     }
 
+    private IMarkdownUpdateProducer? updateProducer;
     private IDisposable? updateProducerSubscription;
+    private bool updateProducerSuspended;
+
+    private void EnsureUpdateProducerSubscription()
+    {
+        if (updateProducerSuspended || updateProducerSubscription is not null || updateProducer is not { } producer) return;
+        var subscription = producer.Subscribe(this);
+        // A synchronous replay can replace the producer or detach this renderer.
+        if (!updateProducerSuspended && ReferenceEquals(updateProducer, producer) && updateProducerSubscription is null)
+            updateProducerSubscription = subscription;
+        else subscription.Dispose();
+    }
+
+    private void SuspendUpdateProducerSubscription()
+    {
+        updateProducerSuspended = true;
+        updateProducerSubscription?.Dispose();
+        updateProducerSubscription = null;
+        collectedTextBlocks = [];
+    }
+
+    /// <inheritdoc/>
+    protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
+    {
+        base.OnAttachedToVisualTree(e);
+        if (!this.IsAttachedToVisualTree()) return;
+        updateProducerSuspended = false;
+        EnsureUpdateProducerSubscription();
+    }
 
     void IObserver<MarkdownDocumentUpdate>.OnCompleted()
     {

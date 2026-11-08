@@ -113,6 +113,7 @@ public partial class MarkdownRenderer
     /// <inheritdoc/>
     protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
     {
+        SuspendUpdateProducerSubscription();
         EndPointerInteraction();
         ClearContextMenuCandidate();
         ClearPointerOverBlock();

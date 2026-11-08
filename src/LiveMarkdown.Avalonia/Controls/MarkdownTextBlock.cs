@@ -337,6 +337,7 @@ public partial class MarkdownTextBlock : SelectableTextBlock
     /// <inheritdoc/>
     protected override void OnDetachedFromLogicalTree(LogicalTreeAttachmentEventArgs e)
     {
+        ReleaseSpareLayout();
         SubscribeToHighlightStyles(null);
         inlineCachesDetached = true;
         ObserveInlineContent(null);
@@ -532,9 +533,10 @@ public partial class MarkdownTextBlock : SelectableTextBlock
     /// <inheritdoc/>
     protected override TextLayout CreateTextLayout(string? text)
     {
-        TextLayoutsCreated++;
-
         var maxSize = GetMaxSizeFromConstraint();
+        activeLayoutConstraint = maxSize;
+        if (TakeArrangeLayout(maxSize) is { } reused) return reused;
+        TextLayoutsCreated++;
         ref var cache = ref TextRunCacheOf(this);
         return CreateTextLayout(text, TextWrapping, maxSize.Width, maxSize.Height, cache ??= new TextRunCache());
     }
@@ -2394,6 +2396,7 @@ public partial class MarkdownTextBlock : SelectableTextBlock
     /// <inheritdoc/>
     protected override void OnMeasureInvalidated()
     {
+        ReleaseArrangeLayouts();
         var textRuns = _textRuns;
         base.OnMeasureInvalidated();
         _textRuns = textRuns;
