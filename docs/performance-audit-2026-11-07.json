@@ -442,23 +442,23 @@
     }
   },
   "prReviewFollowups": {
-    "status": "implemented; focused verification pending",
+    "status": "done",
     "findings": [
       {
         "id": "language-round-trip",
-        "status": "implemented",
+        "status": "done",
         "fix": "Reset content dirtiness when changing highlighters so returning languages cannot trust another language's prefix hint.",
         "tests": "Returning_to_a_language_uses_the_current_source_not_its_previous_tokens (manual and automatic)"
       },
       {
         "id": "nested-spans",
-        "status": "implemented",
+        "status": "done",
         "fix": "Preserve only tokenizer-compatible flat spans on identical source assignment.",
         "tests": "Reassigning_source_replaces_nested_spans_before_highlighting_is_enabled"
       },
       {
         "id": "replacement-collections",
-        "status": "implemented",
+        "status": "done",
         "fix": "Reconnect replaced inline collections once and unsubscribe the actual observed collection when chunks are removed.",
         "tests": [
           "Replacement_inline_collections_are_observed_once_and_retired_collections_are_unsubscribed",
@@ -466,6 +466,14 @@
         ]
       }
     ],
-    "reproduction": "All five new deterministic cases failed on eb7406ab before the product fixes; both language cases reproduced the reported Substring exception."
+    "reproduction": "All five new deterministic cases failed on eb7406ab before the product fixes; both language cases reproduced the reported Substring exception.",
+    "validation": {
+      "focusedRegressionTests": 36,
+      "failed": 0,
+      "newRegressionCases": 5,
+      "benchmarkWorkloadsPassed": 6,
+      "benchmarkObservation": "Code append/no-op allocations and work counts match the pre-review optimized benchmark exactly (16/0 formatting line visits and 551208/384 allocated bytes). Other workload work counts match; wall-clock timings remain observational.",
+      "fullSuiteRun": false
+    }
   }
 }
