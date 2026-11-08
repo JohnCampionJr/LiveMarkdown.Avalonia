@@ -407,5 +407,17 @@
     "Baseline allocation-ratio failure was replaced by direct block-walk/projection-build invariants; original allocation measurement remains an explicit report.",
     "Validation used focused regressions and small audit probes, not the full suite or a long benchmark matrix. Package publication is separate from this fix set.",
     "Compatibility paths deliberately remeasure unsupported custom/embedded table cells and validate arbitrary externally exposed inline collections."
-  ]
+  ],
+  "repeatableBenchmark": {
+    "status": "done",
+    "fixture": "tests/LiveMarkdown.Avalonia.Tests/RepeatableRenderingBenchmarks.cs",
+    "runner": "tools/rendering-benchmark.py",
+    "documentation": "docs/rendering-benchmark.md",
+    "workloads": 6,
+    "warmupsPerWorkload": 2,
+    "samplesPerWorkload": 7,
+    "timingAssertions": false,
+    "validation": "Two fresh-process Release runs passed all correctness checks; work-counter values were identical across every measured sample in both runs. Four deterministic report-comparison tests passed.",
+    "scope": "Warm-cache synchronous UI work, allocations and timings; does not measure retained/native memory, background work, cold start or GPU presentation."
+  }
 }
