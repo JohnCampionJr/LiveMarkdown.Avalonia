@@ -277,6 +277,7 @@ public sealed class MarkdownUpdateProducer : AvaloniaObject, IMarkdownUpdateProd
                 if (generation != parseGeneration) continue;
                 if (pendingChange is not { } latestChange || latestChange.Version != change.Version) continue;
 
+                int? unchangedPrefixBlockCount = null;
                 if (splice)
                 {
                     if (!IncrementalParse.CanSplice(document))
@@ -285,25 +286,31 @@ public sealed class MarkdownUpdateProducer : AvaloniaObject, IMarkdownUpdateProd
                         // which can rewrite text above the restart point. Take the document whole,
                         // this time and from here on.
                         documentIsSpliceable = false;
+                        forceFullUpdate = true;
                         continue;
                     }
 
                     IncrementalParse.Shift(document, textOffset);
-                    if (!IncrementalParse.TrySplice(liveDocument!, textOffset, document))
+                    if (!IncrementalParse.TrySplice(liveDocument!, textOffset, document, out var retainedBlocks))
                     {
                         // The tail names a heading the document did not already carry, so a link to
                         // it anywhere above would resolve differently. Take the whole source once;
                         // the next append splices again.
                         forceFullParseOnce = true;
+                        forceFullUpdate = true;
                         continue;
                     }
 
                     document = liveDocument!;
+                    unchangedPrefixBlockCount = retainedBlocks;
                     SpliceCount++;
                 }
                 else
                 {
                     documentIsSpliceable = IncrementalParse.CanSplice(document);
+                    // Definition-bearing parses can change the meaning of unchanged source
+                    // above the edit. Their nodes need a full render, not merely a full parse.
+                    if (!documentIsSpliceable) forceFullUpdate = true;
                     forceFullParseOnce = false;
                 }
 
@@ -326,7 +333,7 @@ public sealed class MarkdownUpdateProducer : AvaloniaObject, IMarkdownUpdateProd
                 }
                 else
                 {
-                    update = new MarkdownDocumentUpdate.Incremental(previous, document, change);
+                    update = new MarkdownDocumentUpdate.Incremental(previous, document, change, unchangedPrefixBlockCount);
                 }
 
                 pendingChange = null;

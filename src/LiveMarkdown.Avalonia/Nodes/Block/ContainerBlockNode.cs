@@ -25,6 +25,9 @@ public abstract class ContainerBlockNode<TContainerBlock> : BlockNode<TContainer
     /// </summary>
     protected readonly MarkdownRenderer.BlocksProxy proxy;
 
+    private int skippablePrefixBlocks;
+    private object? synchronizedFactories;
+
     /// <summary>
     /// Initializes the child control collection and synchronization proxy.
     /// </summary>
@@ -51,28 +54,45 @@ public abstract class ContainerBlockNode<TContainerBlock> : BlockNode<TContainer
         in ObservableStringBuilderChangedEventArgs change,
         CancellationToken cancellationToken)
     {
-        if (containerBlock.Count == 0) return false;
+        cancellationToken.ThrowIfCancellationRequested();
+        if (containerBlock.Count == 0)
+        {
+            skippablePrefixBlocks = 0;
+            if (ReferenceEquals(this, documentNode)) documentNode.LastPrefixBlocksSkipped = 0;
+            return false;
+        }
 
-        var i = 0;
+        var i = ReferenceEquals(this, documentNode) &&
+            documentNode.UnchangedPrefixBlockCount is { } retained && ReferenceEquals(synchronizedFactories, NodeFactories)
+                ? Math.Min(retained, Math.Min(skippablePrefixBlocks, Math.Min(proxy.Count, containerBlock.Count)))
+                : 0;
+        if (ReferenceEquals(this, documentNode)) documentNode.LastPrefixBlocksSkipped = i;
+        skippablePrefixBlocks = i;
         for (; i < containerBlock.Count; i++)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var block = containerBlock[i];
 
+            BlockNode current;
             if (i < proxy.Count)
             {
-                var oldNode = proxy[i];
-                if (oldNode.Update(documentNode, block, change, cancellationToken) is not false) continue;
-
-                // if Update returned false, it means the block needs to be removed
-                var newNode = CreateBlockNode(documentNode, block, change, cancellationToken);
-                proxy[i] = newNode;
+                current = proxy[i];
+                if (current.Update(documentNode, block, change, cancellationToken) is false)
+                {
+                    // if Update returned false, it means the block needs to be replaced
+                    current = CreateBlockNode(documentNode, block, change, cancellationToken);
+                    proxy[i] = current;
+                }
             }
             else
             {
-                var newNode = CreateBlockNode(documentNode, block, change, cancellationToken);
-                proxy.Add(newNode);
+                current = CreateBlockNode(documentNode, block, change, cancellationToken);
+                proxy.Add(current);
             }
+
+            // Custom nodes can deliberately override dirtiness/matching, even for unchanged AST
+            // objects. Never suppress those calls. Factory edits invalidate this cached boundary.
+            if (skippablePrefixBlocks == i && HasDefaultDirtiness(current)) skippablePrefixBlocks++;
         }
 
         for (var j = proxy.Count - 1; j >= i; j--)
@@ -82,6 +102,17 @@ public abstract class ContainerBlockNode<TContainerBlock> : BlockNode<TContainer
             proxy.RemoveAt(j);
         }
 
+        synchronizedFactories = NodeFactories;
         return true;
+    }
+
+    private static bool HasDefaultDirtiness(BlockNode node)
+    {
+        var type = node.GetType();
+        return type == typeof(ParagraphBlockNode) || type == typeof(HeadingBlockNode) ||
+            type == typeof(CodeBlockNode) || type == typeof(QuoteBlockNode) ||
+            type == typeof(ListBlockNode) || type == typeof(ListItemBlockNode) ||
+            type == typeof(TableNode) || type == typeof(TableCellNode) ||
+            type == typeof(ThematicBreakBlockNode) || type == typeof(AlertBlockNode);
     }
 }

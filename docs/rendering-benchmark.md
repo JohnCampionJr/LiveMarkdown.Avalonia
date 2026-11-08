@@ -52,3 +52,15 @@ from historical source are reported as JSON `null` and displayed as unavailable,
 Keep reports as CI/diagnostic artifacts rather than committing machine-specific numbers.
 
 Comparator regression tests: `python3 -B -m unittest discover -s tools -p 'test_rendering_benchmark.py'`.
+
+The round-three suite adds actual producer/node streaming, opted-in projections, sparse list
+layout, disk-cache writes, concurrent image fetches and stale-result cleanup:
+
+```sh
+python3 tools/rendering-benchmark.py run --suite round3 --output /tmp/lm-round3.json --msbuild-property MermaiderVersion=0.12.2-avalloy.10
+```
+
+It uses `RoundThreeBenchmarks.cs` and the same comparison command. Streaming samples measure
+UI renderer callbacks separately from parsing; async disk/image samples report process-wide
+allocations. Its detailed workload definitions, results and tradeoffs are in
+`performance-round-3.md`. The default six-workload suite remains unchanged.

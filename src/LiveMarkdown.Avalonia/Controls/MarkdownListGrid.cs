@@ -1,4 +1,5 @@
 ﻿using Avalonia;
+using System.Collections.Specialized;
 using Avalonia.Controls;
 
 namespace LiveMarkdown.Avalonia;
@@ -12,6 +13,10 @@ namespace LiveMarkdown.Avalonia;
 public class MarkdownListGrid : Panel
 {
     private readonly Dictionary<int, double> _rowHeights = new();
+    private readonly Dictionary<int, double> _rowOffsets = new();
+    private readonly List<int> _sortedRows = [];
+    private readonly HashSet<Control> _observedChildren = [];
+    internal int RowOffsetBuilds { get; private set; }
     private double _col0Width;
 
     /// <summary>
@@ -50,9 +55,35 @@ public class MarkdownListGrid : Panel
     }
 
     /// <inheritdoc/>
+    protected override void ChildrenChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        if (e.OldItems is not null)
+            foreach (Control child in e.OldItems)
+                if (_observedChildren.Remove(child)) child.PropertyChanged -= HandleChildPlacementChanged;
+        if (e.Action == NotifyCollectionChangedAction.Reset)
+            foreach (var child in _observedChildren.ToArray())
+                if (!Children.Contains(child))
+                {
+                    _observedChildren.Remove(child);
+                    child.PropertyChanged -= HandleChildPlacementChanged;
+                }
+        if (e.NewItems is not null)
+            foreach (Control child in e.NewItems)
+                if (_observedChildren.Add(child)) child.PropertyChanged += HandleChildPlacementChanged;
+        base.ChildrenChanged(sender, e);
+    }
+
+    private void HandleChildPlacementChanged(object? sender, AvaloniaPropertyChangedEventArgs args)
+    {
+        if (args.Property == Grid.RowProperty || args.Property == Grid.ColumnProperty) InvalidateMeasure();
+    }
+
+    /// <inheritdoc/>
     protected override Size MeasureOverride(Size availableSize)
     {
         _rowHeights.Clear();
+        _rowOffsets.Clear();
+        _sortedRows.Clear();
         _col0Width = 0;
 
         // Children is a get only property, so we don't need to cache it in local variable
@@ -109,6 +140,18 @@ public class MarkdownListGrid : Panel
         var totalHeight = _rowHeights.Values.Sum() + Math.Max(0, _rowHeights.Count - 1) * RowSpacing;
         var totalWidth = _col0Width + totalCol1Width + (totalCol1Width > 0 ? ColumnSpacing : 0);
 
+        // Row heights and spacing are measurement inputs. Rebuild ordering/offsets here once,
+        // then width-only arrange passes can reuse them without sorting or allocating maps.
+        _sortedRows.AddRange(_rowHeights.Keys);
+        _sortedRows.Sort();
+        var currentY = 0d;
+        foreach (var row in _sortedRows)
+        {
+            _rowOffsets[row] = currentY;
+            currentY += _rowHeights[row] + RowSpacing;
+        }
+        RowOffsetBuilds++;
+
         // Return the total requested size, expanding to available width if possible.
         return new Size(
             double.IsInfinity(availableSize.Width) ? totalWidth : availableSize.Width,
@@ -122,19 +165,6 @@ public class MarkdownListGrid : Panel
 
         var col1Width = Math.Max(0, finalSize.Width - _col0Width - ColumnSpacing);
 
-        // Sort rows to ensure they render top-to-bottom logically, even if row indices are skipped
-        var sortedRows = _rowHeights.Keys.ToList();
-        sortedRows.Sort();
-
-        // Precalculate Y offsets for each row
-        var rowOffsets = new Dictionary<int, double>();
-        double currentY = 0;
-        foreach (var row in sortedRows)
-        {
-            rowOffsets[row] = currentY;
-            currentY += _rowHeights[row] + RowSpacing;
-        }
-
         // Arrange each child in its safe bounding box
         foreach (var child in Children)
         {
@@ -144,7 +174,7 @@ public class MarkdownListGrid : Panel
             var col = Grid.GetColumn(child);
 
             // Failsafe checks
-            if (!rowOffsets.TryGetValue(row, out var yOffset)) continue;
+            if (!_rowOffsets.TryGetValue(row, out var yOffset)) continue;
             if (!_rowHeights.TryGetValue(row, out var height)) continue;
 
             var xOffset = col <= 0 ? 0 : _col0Width + ColumnSpacing;

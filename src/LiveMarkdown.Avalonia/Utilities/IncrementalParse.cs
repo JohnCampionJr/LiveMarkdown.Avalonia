@@ -26,7 +26,7 @@ namespace LiveMarkdown.Avalonia;
 /// a <see cref="HeadingLinkReferenceDefinition"/> for every heading into a group block at the end of
 /// the document, so a heading is a definition that <c>[Some Heading]</c> anywhere can resolve
 /// against, and its identifier carries a uniqueness suffix that depends on every heading before it.
-/// That group is spliced as document state rather than as content, and <see cref="TrySplice"/>
+/// That group is spliced as document state rather than as content, and <see cref="TrySplice(MarkdownDocument, int, MarkdownDocument)"/>
 /// refuses — for this update only, not for good — in the two cases where the tail cannot see enough
 /// to get it right: when the identifiers it produces are not exactly the ones it replaces, which is
 /// what a new heading or a moved suffix looks like; and when it leaves a bracket sitting in literal
@@ -40,6 +40,9 @@ namespace LiveMarkdown.Avalonia;
 /// </remarks>
 internal static class IncrementalParse
 {
+    // Source slices inside a separately parsed code block retain their original local indexes
+    // when its MarkdownObject spans are shifted. The renderer needs the same origin adjustment.
+    internal static readonly object CodeLineSourceOffsetKey = new();
     /// <summary>
     /// Determines whether a parsed region is free of constructs that can change text outside it.
     /// </summary>
@@ -52,6 +55,11 @@ internal static class IncrementalParse
         {
             switch (descendant)
             {
+                // This traversal runs over the producer's freshly parsed source. Code renderers
+                // may index its line positions; arbitrary public AST/delta inputs stay conservative.
+                case Markdig.Syntax.CodeBlock code:
+                    if (code.GetData(CodeLineSourceOffsetKey) is not int) code.SetData(CodeLineSourceOffsetKey, 0);
+                    break;
                 // A heading's definition is state, but it is state this file knows how to carry.
                 case HeadingLinkReferenceDefinition:
                 case LinkReferenceDefinitionGroup:
@@ -100,6 +108,8 @@ internal static class IncrementalParse
     {
         foreach (var descendant in tail.Descendants())
         {
+            if (descendant is Markdig.Syntax.CodeBlock code)
+                code.SetData(CodeLineSourceOffsetKey, (code.GetData(CodeLineSourceOffsetKey) as int? ?? 0) + offset);
             // An unset span is left alone: parsing the whole source would not have given it one
             // either, and the node sync compares spans for equality.
             if (descendant.Span.Start > descendant.Span.End) continue;
@@ -122,7 +132,11 @@ internal static class IncrementalParse
     /// objects, with the same spans, which is exactly what lets the node sync skip them.
     /// </remarks>
     public static bool TrySplice(MarkdownDocument document, int restartOffset, MarkdownDocument tail)
+        => TrySplice(document, restartOffset, tail, out _);
+
+    internal static bool TrySplice(MarkdownDocument document, int restartOffset, MarkdownDocument tail, out int unchangedPrefixBlockCount)
     {
+        unchangedPrefixBlockCount = 0;
         var documentGroup = document.LastChild as LinkReferenceDefinitionGroup;
         var tailGroup = tail.LastChild as LinkReferenceDefinitionGroup;
 
@@ -136,6 +150,8 @@ internal static class IncrementalParse
         {
             document.RemoveAt(document.Count - 1);
         }
+
+        unchangedPrefixBlockCount = document.Count;
 
         // Taken from the end so each removal is O(1), then added back in source order. Markdig
         // refuses to add a block that still has a parent, which is what the detach is for.

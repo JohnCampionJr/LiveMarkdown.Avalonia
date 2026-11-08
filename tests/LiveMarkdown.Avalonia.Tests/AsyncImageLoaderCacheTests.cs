@@ -335,24 +335,26 @@ public class AsyncImageLoaderCacheTests
     {
         FileBasedAsyncImageLoaderCache.MaxCacheSizeBytes = 10;
         FileBasedAsyncImageLoaderCache.MaxEntrySizeBytes = 100;
-
-        var cache = new FileBasedAsyncImageLoaderCache();
-        var firstUri = new Uri("https://example.com/first.png");
-        var secondUri = new Uri("https://example.com/second.png");
-
-        await cache.SetAsync(firstUri, new MemoryStream(Encoding.UTF8.GetBytes("123456")), AsyncImageLoaderCacheMetadata.Create(firstUri), CancellationToken.None);
-        await Task.Delay(20);
-        await cache.SetAsync(secondUri, new MemoryStream(Encoding.UTF8.GetBytes("abcdef")), AsyncImageLoaderCacheMetadata.Create(secondUri), CancellationToken.None);
-
-        var firstEntry = await cache.GetAsync(firstUri, CancellationToken.None);
-        var secondEntry = await cache.GetAsync(secondUri, CancellationToken.None);
-
-        Assert.That(firstEntry, Is.Null);
-        Assert.That(secondEntry, Is.Not.Null);
-        if (secondEntry is not null)
+        FileBasedAsyncImageLoaderCache.CleanupInterval = TimeSpan.FromHours(1);
+        var oldClock = FileBasedAsyncImageLoaderCache.Clock;
+        var clock = new RoundThreeDiskCacheTests.ManualClock();
+        FileBasedAsyncImageLoaderCache.Clock = clock;
+        try
         {
-            await secondEntry.DisposeAsync();
+            var cache = new FileBasedAsyncImageLoaderCache();
+            var firstUri = new Uri("https://example.com/first.png");
+            var secondUri = new Uri("https://example.com/second.png");
+            using var firstBody = new MemoryStream(Encoding.UTF8.GetBytes("123456"));
+            await cache.SetAsync(firstUri, firstBody, AsyncImageLoaderCacheMetadata.Create(firstUri), CancellationToken.None);
+            clock.Advance(TimeSpan.FromSeconds(1));
+            using var secondBody = new MemoryStream(Encoding.UTF8.GetBytes("abcdef"));
+            await cache.SetAsync(secondUri, secondBody, AsyncImageLoaderCacheMetadata.Create(secondUri), CancellationToken.None);
+            await using var firstEntry = await cache.GetAsync(firstUri, CancellationToken.None);
+            await using var secondEntry = await cache.GetAsync(secondUri, CancellationToken.None);
+            Assert.That(firstEntry, Is.Null);
+            Assert.That(secondEntry, Is.Not.Null);
         }
+        finally { FileBasedAsyncImageLoaderCache.Clock = oldClock; }
     }
 
     [Test]

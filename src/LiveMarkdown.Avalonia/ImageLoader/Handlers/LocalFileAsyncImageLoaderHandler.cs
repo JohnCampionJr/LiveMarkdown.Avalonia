@@ -11,6 +11,9 @@ public class LocalFileAsyncImageLoaderHandler : AsyncImageLoaderHandler
     public static LocalFileAsyncImageLoaderHandler Shared { get; } = new();
 
     /// <inheritdoc/>
+    public override bool CoalesceConcurrentLoads => false;
+
+    /// <inheritdoc/>
     public override IEnumerable<string> SupportedSchemes => ["file"];
 
     private LocalFileAsyncImageLoaderHandler() { }

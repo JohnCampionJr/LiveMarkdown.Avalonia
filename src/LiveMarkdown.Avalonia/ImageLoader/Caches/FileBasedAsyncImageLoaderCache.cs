@@ -1,6 +1,5 @@
 using System.Buffers;
 using System.Buffers.Binary;
-using System.Collections.Concurrent;
 using System.Collections.Immutable;
 using System.Security.Cryptography;
 using System.Text;
@@ -33,7 +32,14 @@ public class FileBasedAsyncImageLoaderCache : AsyncImageLoaderCache
 
     private static ReadOnlySpan<byte> FooterMagic => "DEARVALM"u8;
     private static readonly TimeSpan TemporaryDirectoryCleanupAge = TimeSpan.FromMinutes(10);
-    private static readonly ConcurrentDictionary<string, SemaphoreSlim> EntryLocks = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly ImageCacheEntryLockRegistry EntryLocks = new();
+    private static readonly object AccountingSync = new();
+    private static Dictionary<string, CleanupEntry> _knownEntries = new(StringComparer.OrdinalIgnoreCase);
+    private static long _knownBodyBytes;
+    private static AccountingSettings? _accountingSettings;
+    internal static TimeProvider Clock { get; set; } = TimeProvider.System;
+    internal static int DirectoryScanCount { get; private set; }
+    internal static int ActiveEntryLockCount => EntryLocks.Count;
     private static readonly SemaphoreSlim CleanupGate = new(1, 1);
     private static DateTimeOffset _lastCleanup = DateTimeOffset.MinValue;
 
@@ -67,7 +73,10 @@ public class FileBasedAsyncImageLoaderCache : AsyncImageLoaderCache
 
     /// <summary>
     /// Gets or sets the minimum interval between automatic cleanup attempts.
-    /// Cleanup is triggered by writes and remains best-effort.
+    /// Cleanup is triggered by writes and remains best-effort. Local mutations update size accounting
+    /// immediately. Changes made by other processes are reconciled at this interval; a nonpositive
+    /// interval requests reconciliation on every mutation. Changing the directory or settings also
+    /// forces reconciliation before the next mutation.
     /// </summary>
     public static TimeSpan CleanupInterval { get; set; } = TimeSpan.FromMinutes(5);
 
@@ -98,9 +107,14 @@ public class FileBasedAsyncImageLoaderCache : AsyncImageLoaderCache
         {
             var paths = GetPaths(uri);
             var (metadata, body) = await OpenEntryAsync(uri, paths, openBody: true, cancellationToken);
-            if (metadata is null || body is null) return null;
+            if (metadata is null || body is null)
+            {
+                ForgetKnownEntryIfRemoved(paths.EntryPath);
+                return null;
+            }
 
             TouchAccessTime(paths.EntryPath);
+            RecordKnownAccess(paths.EntryPath);
             return new AsyncImageLoaderCacheEntry(body, metadata.Clone());
         }
         catch (Exception ex) when (IsIOException(ex))
@@ -123,17 +137,21 @@ public class FileBasedAsyncImageLoaderCache : AsyncImageLoaderCache
             transaction = CreateTransactionPaths();
             Directory.CreateDirectory(transaction.DirectoryPath);
 
-            if (!await WriteTransactionEntryAsync(uri, stream, metadata, transaction.EntryPath, cancellationToken))
-            {
-                return;
-            }
+            var written = await WriteTransactionEntryAsync(uri, stream, metadata, transaction.EntryPath, cancellationToken);
+            if (written is null) return;
 
-            await using (var _ = await AcquireEntryLockAsync(paths, cancellationToken))
+            await CleanupGate.WaitAsync(cancellationToken);
+            try
             {
-                MoveReplace(transaction.EntryPath, paths.EntryPath);
+                await CleanupIfNeededCoreAsync(cancellationToken, transaction.DirectoryPath);
+                await using (var entryLock = await AcquireEntryLockAsync(paths, cancellationToken))
+                {
+                    MoveReplace(transaction.EntryPath, paths.EntryPath);
+                    RecordKnownEntry(paths.EntryPath, written);
+                }
+                await EvictKnownEntriesAsync(cancellationToken);
             }
-
-            await CleanupIfNeededAsync(cancellationToken);
+            finally { CleanupGate.Release(); }
         }
         catch (Exception ex) when (IsIOException(ex))
         {
@@ -153,38 +171,36 @@ public class FileBasedAsyncImageLoaderCache : AsyncImageLoaderCache
 
         var paths = GetPaths(uri);
         TransactionPaths transaction = default;
-
+        await CleanupGate.WaitAsync(cancellationToken);
         try
         {
-            await using var entryLock = await AcquireEntryLockAsync(paths, cancellationToken);
-            var (existingMetadata, body) = await OpenEntryAsync(uri, paths, openBody: true, cancellationToken);
-            if (existingMetadata is null || body is null) return;
-
-            var updatedMetadata = existingMetadata.Clone();
-            updatedMetadata.UpdateFromValidation(metadata);
-            ApplyDefaultFreshness(updatedMetadata);
-
-            if (updatedMetadata.NoStore)
+            await CleanupIfNeededCoreAsync(cancellationToken);
+            await using (var entryLock = await AcquireEntryLockAsync(paths, cancellationToken))
             {
-                RemoveEntry(paths);
-                return;
-            }
-
-            transaction = CreateTransactionPaths();
-            Directory.CreateDirectory(transaction.DirectoryPath);
-            try
-            {
-                if (!await WriteTransactionEntryAsync(uri, body, updatedMetadata, transaction.EntryPath, cancellationToken))
+                var (existingMetadata, body) = await OpenEntryAsync(uri, paths, openBody: true, cancellationToken);
+                if (existingMetadata is null || body is null) return;
+                AsyncImageLoaderCacheMetadata? written;
+                await using (body)
                 {
-                    return;
+                    var updatedMetadata = existingMetadata.Clone();
+                    updatedMetadata.UpdateFromValidation(metadata);
+                    ApplyDefaultFreshness(updatedMetadata);
+                    if (updatedMetadata.NoStore)
+                    {
+                        RemoveEntry(paths);
+                        ForgetKnownEntryIfRemoved(paths.EntryPath);
+                        return;
+                    }
+                    transaction = CreateTransactionPaths();
+                    Directory.CreateDirectory(transaction.DirectoryPath);
+                    written = await WriteTransactionEntryAsync(uri, body, updatedMetadata, transaction.EntryPath, cancellationToken);
+                    if (written is null) return;
                 }
+                // Close the old body before replacing its file, including on Windows.
+                MoveReplace(transaction.EntryPath, paths.EntryPath);
+                RecordKnownEntry(paths.EntryPath, written);
             }
-            finally
-            {
-                await body.DisposeAsync();
-            }
-
-            MoveReplace(transaction.EntryPath, paths.EntryPath);
+            await EvictKnownEntriesAsync(cancellationToken);
         }
         catch (Exception ex) when (IsIOException(ex))
         {
@@ -192,6 +208,7 @@ public class FileBasedAsyncImageLoaderCache : AsyncImageLoaderCache
         }
         finally
         {
+            CleanupGate.Release();
             DeleteDirectoryIfExists(transaction.DirectoryPath);
         }
     }
@@ -203,15 +220,18 @@ public class FileBasedAsyncImageLoaderCache : AsyncImageLoaderCache
         if (!IsCacheable(uri)) return;
 
         var paths = GetPaths(uri);
+        await CleanupGate.WaitAsync(cancellationToken);
         try
         {
             await using var entryLock = await AcquireEntryLockAsync(paths, cancellationToken);
             RemoveEntry(paths);
+            ForgetKnownEntryIfRemoved(paths.EntryPath);
         }
         catch (Exception ex) when (IsIOException(ex))
         {
             // Removing a cache entry is best-effort.
         }
+        finally { CleanupGate.Release(); }
     }
 
     /// <inheritdoc/>
@@ -225,6 +245,13 @@ public class FileBasedAsyncImageLoaderCache : AsyncImageLoaderCache
             if (Directory.Exists(CacheDirectory))
             {
                 Directory.Delete(CacheDirectory, true);
+            }
+            lock (AccountingSync)
+            {
+                _knownEntries.Clear();
+                _knownBodyBytes = 0;
+                _accountingSettings = CurrentAccountingSettings();
+                _lastCleanup = Clock.GetUtcNow();
             }
         }
         catch (Exception ex) when (IsIOException(ex))
@@ -281,7 +308,7 @@ public class FileBasedAsyncImageLoaderCache : AsyncImageLoaderCache
         return new TransactionPaths(directory, Path.Combine(directory, TemporaryEntryFileName));
     }
 
-    private static async Task<bool> WriteTransactionEntryAsync(
+    private static async Task<AsyncImageLoaderCacheMetadata?> WriteTransactionEntryAsync(
         Uri uri,
         Stream source,
         AsyncImageLoaderCacheMetadata metadata,
@@ -313,7 +340,7 @@ public class FileBasedAsyncImageLoaderCache : AsyncImageLoaderCache
                 length += read;
                 if (MaxEntrySizeBytes > 0 && length > MaxEntrySizeBytes)
                 {
-                    return false;
+                    return null;
                 }
 
                 hash.AppendData(buffer.AsSpan(0, read));
@@ -332,7 +359,7 @@ public class FileBasedAsyncImageLoaderCache : AsyncImageLoaderCache
             AsyncImageLoaderCacheMetadataJsonSerializerContext.Default.AsyncImageLoaderCacheMetadata);
         if (metadataBytes.Length is <= 0 or > MaximumMetadataLength)
         {
-            return false;
+            return null;
         }
 
         await destination.WriteAsync(metadataBytes, cancellationToken);
@@ -342,12 +369,12 @@ public class FileBasedAsyncImageLoaderCache : AsyncImageLoaderCache
         await destination.WriteAsync(footer.ToArray(), cancellationToken);
         await destination.FlushAsync(cancellationToken);
 
-        return true;
+        return storedMetadata;
     }
 
     private static AsyncImageLoaderCacheMetadata NormalizeMetadata(Uri uri, AsyncImageLoaderCacheMetadata metadata, long length, string bodyHash)
     {
-        var now = DateTimeOffset.UtcNow;
+        var now = Clock.GetUtcNow();
         var storedMetadata = metadata.Clone();
 
         storedMetadata.SourceUri = NormalizeUri(uri);
@@ -469,102 +496,127 @@ public class FileBasedAsyncImageLoaderCache : AsyncImageLoaderCache
         return expectedLength == fileLength;
     }
 
-    private async static Task CleanupIfNeededAsync(CancellationToken cancellationToken)
+    // CleanupGate serializes mutations and reconciliation. Entry locks are always acquired
+    // inside that gate, so cleanup cannot deadlock a writer holding the same entry lock.
+    private static async Task CleanupIfNeededCoreAsync(CancellationToken cancellationToken, string? protectedTransactionDirectory = null)
     {
-        await CleanupGate.WaitAsync(cancellationToken);
-        try
+        var now = Clock.GetUtcNow();
+        var settings = CurrentAccountingSettings();
+        if (_accountingSettings != settings || CleanupInterval <= TimeSpan.Zero || now - _lastCleanup >= CleanupInterval)
         {
-            await CleanupIfNeededCoreAsync(cancellationToken);
+            await ReconcileEntriesAsync(cancellationToken, protectedTransactionDirectory);
+            _accountingSettings = settings;
+            _lastCleanup = now;
         }
-        finally
-        {
-            CleanupGate.Release();
-        }
+        await EvictKnownEntriesAsync(cancellationToken);
     }
 
-    private static async Task CleanupIfNeededCoreAsync(CancellationToken cancellationToken)
+    private static AccountingSettings CurrentAccountingSettings() => new(
+        Path.GetFullPath(CacheDirectory), MaxCacheSizeBytes, MaxEntrySizeBytes,
+        DefaultFreshnessLifetime, CleanupInterval, Clock);
+
+    private static async Task ReconcileEntriesAsync(CancellationToken cancellationToken, string? protectedTransactionDirectory)
     {
-        var now = DateTimeOffset.UtcNow;
-        if (CleanupInterval > TimeSpan.Zero && now - _lastCleanup < CleanupInterval)
-        {
-            if (MaxCacheSizeBytes <= 0 || await GetTotalCacheSizeAsync(cancellationToken) <= MaxCacheSizeBytes)
-            {
-                return;
-            }
-        }
-
-        _lastCleanup = now;
-        await CleanupAsync(cancellationToken);
-    }
-
-    private static async Task CleanupAsync(CancellationToken cancellationToken)
-    {
-        if (!Directory.Exists(CacheDirectory)) return;
-
-        CleanupOrphanFiles(cancellationToken);
-
-        var entries = new List<CleanupEntry>();
-        var totalSize = 0L;
-        var now = DateTimeOffset.UtcNow;
-
-        foreach (var entryPath in Directory.EnumerateFiles(CacheDirectory, "*" + EntryExtension, SearchOption.AllDirectories))
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            if (IsUnderTemporaryDirectory(entryPath)) continue;
-
-            var paths = CreatePathsFromEntryPath(entryPath);
-            var entry = await OpenEntryAsync(null, paths, openBody: false, cancellationToken);
-            if (entry.Metadata is null)
-            {
-                continue;
-            }
-
-            var fileInfo = new FileInfo(entryPath);
-            if (!fileInfo.Exists) continue;
-
-            var entryLength = entry.Metadata.Length ?? fileInfo.Length;
-            var lastAccessedAt = GetLastAccessedAt(fileInfo, entry.Metadata);
-            totalSize += entryLength;
-            entries.Add(new CleanupEntry(entryPath, entryLength, lastAccessedAt, entry.Metadata.ExpiresAt is { } expiresAt && expiresAt <= now));
-        }
-
-        if (MaxCacheSizeBytes <= 0 || totalSize <= MaxCacheSizeBytes) return;
-
-        foreach (var entry in entries
-                     .OrderByDescending(static entry => entry.IsExpired)
-                     .ThenBy(static entry => entry.LastAccessedAt))
-        {
-            if (totalSize <= MaxCacheSizeBytes) break;
-
-            var paths = CreatePathsFromEntryPath(entry.EntryPath);
-            await using var entryLock = await AcquireEntryLockAsync(paths, cancellationToken);
-            DeleteIfExists(entry.EntryPath);
-            totalSize -= entry.Length;
-        }
-    }
-
-    private static async Task<long> GetTotalCacheSizeAsync(CancellationToken cancellationToken)
-    {
-        if (!Directory.Exists(CacheDirectory)) return 0L;
-
+        DirectoryScanCount++;
+        var entries = new Dictionary<string, CleanupEntry>(StringComparer.OrdinalIgnoreCase);
         var total = 0L;
-        foreach (var entryPath in Directory.EnumerateFiles(CacheDirectory, "*" + EntryExtension, SearchOption.AllDirectories))
+        if (Directory.Exists(CacheDirectory))
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            if (!IsUnderTemporaryDirectory(entryPath))
+            CleanupOrphanFiles(cancellationToken, protectedTransactionDirectory);
+            foreach (var entryPath in Directory.EnumerateFiles(CacheDirectory, "*" + EntryExtension, SearchOption.AllDirectories))
             {
-                var paths = CreatePathsFromEntryPath(entryPath);
-                var entry = await OpenEntryAsync(null, paths, openBody: false, cancellationToken);
-                total += entry.Metadata?.Length ?? new FileInfo(entryPath).Length;
+                cancellationToken.ThrowIfCancellationRequested();
+                if (IsUnderTemporaryDirectory(entryPath)) continue;
+                try
+                {
+                    var paths = CreatePathsFromEntryPath(entryPath);
+                    var entry = await OpenEntryAsync(null, paths, openBody: false, cancellationToken);
+                    if (entry.Metadata is null) continue;
+                    var fileInfo = new FileInfo(entryPath);
+                    if (!fileInfo.Exists) continue;
+                    var length = entry.Metadata.Length ?? fileInfo.Length;
+                    var key = Path.GetFullPath(entryPath);
+                    entries[key] = new CleanupEntry(key, length, GetLastAccessedAt(fileInfo, entry.Metadata), entry.Metadata.ExpiresAt);
+                    total += length;
+                }
+                catch (Exception ex) when (IsIOException(ex))
+                {
+                    // Readers and external processes can remove an entry during reconciliation.
+                    // One disappearing/inaccessible file must not prevent this local commit.
+                }
             }
         }
-
-        return total;
+        lock (AccountingSync)
+        {
+            _knownEntries = entries;
+            _knownBodyBytes = total;
+        }
     }
 
-    private static void CleanupOrphanFiles(CancellationToken cancellationToken)
+    private static void RecordKnownEntry(string path, AsyncImageLoaderCacheMetadata metadata)
     {
-        CleanupTemporaryRoot();
+        var key = Path.GetFullPath(path);
+        lock (AccountingSync)
+        {
+            if (_knownEntries.TryGetValue(key, out var old)) _knownBodyBytes -= old.Length;
+            var length = metadata.Length!.Value;
+            _knownEntries[key] = new CleanupEntry(key, length, metadata.LastAccessedAt, metadata.ExpiresAt);
+            _knownBodyBytes += length;
+        }
+    }
+
+    private static void RecordKnownAccess(string path)
+    {
+        var key = Path.GetFullPath(path);
+        lock (AccountingSync)
+        {
+            if (_knownEntries.TryGetValue(key, out var entry))
+                _knownEntries[key] = entry with { LastAccessedAt = Clock.GetUtcNow() };
+        }
+    }
+
+    private static void ForgetKnownEntryIfRemoved(string path)
+    {
+        if (File.Exists(path)) return;
+        var key = Path.GetFullPath(path);
+        lock (AccountingSync)
+        {
+            if (_knownEntries.Remove(key, out var old)) _knownBodyBytes -= old.Length;
+        }
+    }
+
+    private static async Task EvictKnownEntriesAsync(CancellationToken cancellationToken)
+    {
+        if (MaxCacheSizeBytes <= 0) return;
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            CleanupEntry? oldest = null;
+            var now = Clock.GetUtcNow();
+            lock (AccountingSync)
+            {
+                if (_knownBodyBytes <= MaxCacheSizeBytes) return;
+                foreach (var entry in _knownEntries.Values)
+                {
+                    if (oldest is not { } current) { oldest = entry; continue; }
+                    var expired = entry.ExpiresAt is { } expires && expires <= now;
+                    var currentExpired = current.ExpiresAt is { } currentExpires && currentExpires <= now;
+                    if ((expired && !currentExpired) ||
+                        (expired == currentExpired && entry.LastAccessedAt < current.LastAccessedAt)) oldest = entry;
+                }
+            }
+            if (oldest is not { } candidate) return;
+            var paths = CreatePathsFromEntryPath(candidate.EntryPath);
+            await using var entryLock = await AcquireEntryLockAsync(paths, cancellationToken);
+            DeleteIfExists(candidate.EntryPath);
+            if (File.Exists(candidate.EntryPath)) return; // inaccessible entries remain accounted; retry later
+            ForgetKnownEntryIfRemoved(candidate.EntryPath);
+        }
+    }
+
+    private static void CleanupOrphanFiles(CancellationToken cancellationToken, string? protectedTransactionDirectory)
+    {
+        CleanupTemporaryRoot(protectedTransactionDirectory);
         DeleteFilesByExtension(LegacyDataExtension, cancellationToken);
         DeleteFilesByExtension(LegacyMetadataExtension, cancellationToken);
         DeleteFilesByExtension(LegacyTempExtension, cancellationToken);
@@ -572,14 +624,18 @@ public class FileBasedAsyncImageLoaderCache : AsyncImageLoaderCache
         CleanupEmptyShardDirectories(cancellationToken);
     }
 
-    private static void CleanupTemporaryRoot()
+    private static void CleanupTemporaryRoot(string? protectedTransactionDirectory)
     {
         var temporaryRoot = Path.Combine(CacheDirectory, TemporaryDirectoryName);
         if (!Directory.Exists(temporaryRoot)) return;
 
+        // These filesystem timestamps use the OS clock, not the injected cache-policy clock.
         var deleteBefore = DateTime.UtcNow - TemporaryDirectoryCleanupAge;
         foreach (var directory in Directory.EnumerateDirectories(temporaryRoot))
         {
+            // A slow stream may finish after the orphan age. Do not delete its transaction
+            // in the reconciliation immediately before that very transaction is committed.
+            if (string.Equals(directory, protectedTransactionDirectory, StringComparison.OrdinalIgnoreCase)) continue;
             try
             {
                 var directoryInfo = new DirectoryInfo(directory);
@@ -698,7 +754,7 @@ public class FileBasedAsyncImageLoaderCache : AsyncImageLoaderCache
     {
         try
         {
-            File.SetLastAccessTimeUtc(path, DateTime.UtcNow);
+            File.SetLastAccessTimeUtc(path, Clock.GetUtcNow().UtcDateTime);
         }
         catch
         {
@@ -765,17 +821,15 @@ public class FileBasedAsyncImageLoaderCache : AsyncImageLoaderCache
     {
         Directory.CreateDirectory(Path.GetDirectoryName(paths.LockPath) ?? CacheDirectory);
 
-        var semaphore = EntryLocks.GetOrAdd(paths.LockPath, static _ => new SemaphoreSlim(1, 1));
-        await semaphore.WaitAsync(cancellationToken);
-
+        var reservation = await EntryLocks.AcquireAsync(paths.LockPath, cancellationToken);
         try
         {
             var lockStream = OpenLockFile(paths.LockPath, FileMode.OpenOrCreate);
-            return new EntryLock(semaphore, lockStream);
+            return new EntryLock(reservation, lockStream);
         }
         catch
         {
-            semaphore.Release();
+            reservation.Dispose();
             throw;
         }
     }
@@ -789,14 +843,17 @@ public class FileBasedAsyncImageLoaderCache : AsyncImageLoaderCache
 
     private readonly record struct EntryReadResult(AsyncImageLoaderCacheMetadata? Metadata, Stream? Body);
 
-    private readonly record struct CleanupEntry(string EntryPath, long Length, DateTimeOffset LastAccessedAt, bool IsExpired);
+    private readonly record struct CleanupEntry(string EntryPath, long Length, DateTimeOffset LastAccessedAt, DateTimeOffset? ExpiresAt);
 
-    private sealed class EntryLock(SemaphoreSlim semaphore, FileStream lockStream) : IAsyncDisposable
+    private readonly record struct AccountingSettings(string Directory, long SizeLimit, long EntryLimit,
+        TimeSpan Freshness, TimeSpan Interval, TimeProvider Clock);
+
+    private sealed class EntryLock(IDisposable reservation, FileStream lockStream) : IAsyncDisposable
     {
         public async ValueTask DisposeAsync()
         {
-            await lockStream.DisposeAsync();
-            semaphore.Release();
+            try { await lockStream.DisposeAsync(); }
+            finally { reservation.Dispose(); }
         }
     }
 

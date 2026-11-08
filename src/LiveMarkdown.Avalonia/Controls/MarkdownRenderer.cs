@@ -232,7 +232,9 @@ public partial class MarkdownRenderer : Control
                     value.Version);
 
             var time = DateTimeOffset.UtcNow;
-            documentNode.Update(documentNode, value.Document, change, CancellationToken.None);
+            var unchangedPrefix = value is MarkdownDocumentUpdate.Incremental proved && previous is not null && proved.Follows(previous)
+                ? proved.UnchangedPrefixBlockCount : null;
+            documentNode.UpdateWithPrefix(value.Document, change, unchangedPrefix, CancellationToken.None);
 
             if (VerboseLogger?.IsValid is true)
             {

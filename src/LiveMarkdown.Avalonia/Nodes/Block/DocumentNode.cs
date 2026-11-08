@@ -12,6 +12,20 @@ public sealed class DocumentNode : ContainerBlockNode<MarkdownDocument>
     /// </summary>
     public MarkdownRenderer Owner { get; }
 
+    internal int? UnchangedPrefixBlockCount { get; private set; }
+    internal int LastPrefixBlocksSkipped { get; set; }
+
+    internal bool? UpdateWithPrefix(
+        MarkdownDocument document,
+        in ObservableStringBuilderChangedEventArgs change,
+        int? unchangedPrefixBlockCount,
+        CancellationToken cancellationToken)
+    {
+        UnchangedPrefixBlockCount = unchangedPrefixBlockCount;
+        try { return Update(this, document, change, cancellationToken); }
+        finally { UnchangedPrefixBlockCount = null; }
+    }
+
     /// <summary>
     /// Initializes a document node for the specified renderer.
     /// </summary>

@@ -13,6 +13,9 @@ public class AvaloniaResourceAsyncImageLoaderHandler : AsyncImageLoaderHandler
     public static AvaloniaResourceAsyncImageLoaderHandler Shared { get; } = new();
 
     /// <inheritdoc/>
+    public override bool CoalesceConcurrentLoads => false;
+
+    /// <inheritdoc/>
     public override IEnumerable<string> SupportedSchemes => ["avares"];
 
     private AvaloniaResourceAsyncImageLoaderHandler() { }

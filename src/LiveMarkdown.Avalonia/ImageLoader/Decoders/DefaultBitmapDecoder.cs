@@ -15,6 +15,9 @@ public class DefaultBitmapDecoder : IImageDecoder
     public static DefaultBitmapDecoder Shared { get; } = new();
 
     /// <inheritdoc/>
+    public bool OwnsDecodedImage(IImage image) => true;
+
+    /// <inheritdoc/>
     public Task<IImage?> TryDecodeAsync(Image target, Stream stream, Uri uri, CancellationToken cancellationToken)
     {
         try
