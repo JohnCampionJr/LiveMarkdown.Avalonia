@@ -440,5 +440,32 @@
       "interpretation": "Targeted allocation and table work reductions repeated in both pairs. Width-change and construction timing differences changed sign between pairs; no speedup claimed for those controls. Timings remain observations, not gates.",
       "provenance": "Dirty markers reflect benchmark-only changes. Original tracked source/configuration matched f8e0fd3; optimized product source matched e4d6f49b. Harness/headless-host bytes and report environments matched across both worktrees."
     }
+  },
+  "prReviewFollowups": {
+    "status": "implemented; focused verification pending",
+    "findings": [
+      {
+        "id": "language-round-trip",
+        "status": "implemented",
+        "fix": "Reset content dirtiness when changing highlighters so returning languages cannot trust another language's prefix hint.",
+        "tests": "Returning_to_a_language_uses_the_current_source_not_its_previous_tokens (manual and automatic)"
+      },
+      {
+        "id": "nested-spans",
+        "status": "implemented",
+        "fix": "Preserve only tokenizer-compatible flat spans on identical source assignment.",
+        "tests": "Reassigning_source_replaces_nested_spans_before_highlighting_is_enabled"
+      },
+      {
+        "id": "replacement-collections",
+        "status": "implemented",
+        "fix": "Reconnect replaced inline collections once and unsubscribe the actual observed collection when chunks are removed.",
+        "tests": [
+          "Replacement_inline_collections_are_observed_once_and_retired_collections_are_unsubscribed",
+          "Removing_a_chunk_unsubscribes_its_original_collection_even_if_replaced_while_disabled"
+        ]
+      }
+    ],
+    "reproduction": "All five new deterministic cases failed on eb7406ab before the product fixes; both language cases reproduced the reported Substring exception."
   }
 }

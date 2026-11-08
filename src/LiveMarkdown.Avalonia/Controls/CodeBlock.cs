@@ -273,9 +273,16 @@ public class CodeBlock : TemplatedControl
     private IReadOnlyList<InlineCollection> ChunkInlines()
     {
         if (!mutableTextExposed) return chunkInlineCollections;
-        var collections = new InlineCollection[chunks.Count];
-        for (var i = 0; i < chunks.Count; i++) collections[i] = InlinesOf(chunks[i]);
-        return collections;
+        for (var i = 0; i < chunks.Count; i++)
+        {
+            var current = InlinesOf(chunks[i]);
+            var previous = chunkInlineCollections[i];
+            if (ReferenceEquals(previous, current)) continue;
+            previous.CollectionChanged -= HandleInlinesChanged;
+            current.CollectionChanged += HandleInlinesChanged;
+            chunkInlineCollections[i] = current;
+        }
+        return chunkInlineCollections;
     }
 
     /// <summary>Creates text blocks up to and including <paramref name="index"/>, and returns that one.</summary>
@@ -442,7 +449,9 @@ public class CodeBlock : TemplatedControl
         while (chunks.Count > neededChunks)
         {
             var block = chunks[^1];
-            if (InlinesOf(block) is { } inlines) inlines.CollectionChanged -= HandleInlinesChanged;
+            // This is the subscribed collection, which may differ from the block's current
+            // collection when it was replaced externally while highlighting was disabled.
+            chunkInlineCollections[^1].CollectionChanged -= HandleInlinesChanged;
             if (deferredInlines?.Remove(block) == true)
                 block.EffectiveViewportChanged -= OnDeferredChunkViewportChanged;
             linesPanel?.Children.Remove(block);
@@ -533,7 +542,9 @@ public class CodeBlock : TemplatedControl
         }
         if (inline is not Span span) return false;
         foreach (var child in span.Inlines)
-            if (!LineMatches(child, text, ref offset)) return false;
+            // The tokenizer's fallback extracts direct Runs only. Preserve its flat styled
+            // spans, but normalize externally supplied nested trees before re-highlighting.
+            if (child is not Run || !LineMatches(child, text, ref offset)) return false;
         return true;
     }
 
@@ -692,6 +703,10 @@ public class CodeBlock : TemplatedControl
         {
             var language = Language.ToLowerInvariant();
             var themeRevision = SyntaxHighlighting.ThemeRevision;
+            // Every language owns a separate live token history. Its previous source may be
+            // older than the dirty hint accumulated for the language we just highlighted.
+            if (highlightedLanguage is not null && highlightedLanguage != language)
+                firstDirtyContentLine = 0;
             if (highlightedLanguage is not null && (highlightedLanguage != language ||
                 highlightedTheme != ColorTheme || highlightedCustomTheme != CustomColorTheme ||
                 highlightedThemeRevision != themeRevision))

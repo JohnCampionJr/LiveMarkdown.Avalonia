@@ -217,6 +217,79 @@ public class CodeHighlightingPerformanceTests
         Assert.That(block.CodeTextBlocks[0].Inlines![0], Is.TypeOf<Span>());
     });
 
+    [TestCase(false)]
+    [TestCase(true)]
+    public Task Returning_to_a_language_uses_the_current_source_not_its_previous_tokens(bool automatic) => OnSession(() =>
+    {
+        var block = new CodeBlock { AutoSyntaxHighlight = automatic, Language = "csharp", Code = "public class Example {}" };
+        if (!automatic) block.HighlightSyntax();
+        block.Language = "json";
+        block.Code = "x";
+        if (!automatic) block.HighlightSyntax();
+        Assert.DoesNotThrow(() =>
+        {
+            block.Language = "csharp";
+            if (!automatic) block.HighlightSyntax();
+        });
+        Assert.That(block.Code, Is.EqualTo("x"));
+        Assert.That(block.LastHighlightLineVisits, Is.EqualTo(1));
+        // Inspect only after the round-trip: exposing the public collection switches to the
+        // conservative comparison path and would otherwise mask the authoritative-hint bug.
+        Assert.That(block.Inlines.LayoutText, Is.EqualTo("x"));
+    });
+
+    [Test]
+    public Task Reassigning_source_replaces_nested_spans_before_highlighting_is_enabled() => OnSession(() =>
+    {
+        const string source = "public class Example {}";
+        var block = new CodeBlock { AutoSyntaxHighlight = false, Language = "csharp", Code = source };
+        block.Inlines[0] = new Span { Inlines = { new Span { Inlines = { new Run(source) } } } };
+        block.Code = source;
+        Assert.That(block.Inlines[0], Is.TypeOf<Run>(), "unsupported nested trees must become authoritative plain text");
+        block.AutoSyntaxHighlight = true;
+        Assert.That(block.Code, Is.EqualTo(source));
+        Assert.That(block.Inlines[0], Is.TypeOf<Span>());
+    });
+
+    [Test]
+    public Task Replacement_inline_collections_are_observed_once_and_retired_collections_are_unsubscribed() => OnSession(() =>
+    {
+        var block = new CodeBlock { Language = "csharp", Code = "// original" };
+        var old = block.Inlines;
+        block.AutoSyntaxHighlight = false;
+        var current = new InlineCollection { new Run("var result = 7;") };
+        block.CodeTextBlocks[0].Inlines = current;
+        block.AutoSyntaxHighlight = true;
+        // Repeat the transition to catch duplicate subscriptions as well as missing ones.
+        block.AutoSyntaxHighlight = false;
+        block.AutoSyntaxHighlight = true;
+        var passes = block.SyntaxHighlightPassCount;
+        current[0] = new Run("public class Replacement {}");
+        Assert.That(block.SyntaxHighlightPassCount, Is.EqualTo(passes + 1));
+        Assert.That(current[0], Is.TypeOf<Span>());
+        Assert.That(block.Code, Is.EqualTo("public class Replacement {}"));
+        old.Add(new Run("retired"));
+        Assert.That(block.SyntaxHighlightPassCount, Is.EqualTo(passes + 1), "the retired collection must not retain its handler");
+        block.Code = null;
+        current.Add(new Run("removed chunk"));
+        Assert.That(block.SyntaxHighlightPassCount, Is.EqualTo(passes + 1), "removing a chunk must unsubscribe its current collection");
+    });
+
+    [Test]
+    public Task Removing_a_chunk_unsubscribes_its_original_collection_even_if_replaced_while_disabled() => OnSession(() =>
+    {
+        var block = new CodeBlock { Language = "csharp", Code = "// original" };
+        var old = block.Inlines;
+        block.AutoSyntaxHighlight = false;
+        block.CodeTextBlocks[0].Inlines = new InlineCollection { new Run("replacement") };
+        block.Code = null;
+        block.Code = "// current";
+        block.AutoSyntaxHighlight = true;
+        var passes = block.SyntaxHighlightPassCount;
+        old.Add(new Run("retired"));
+        Assert.That(block.SyntaxHighlightPassCount, Is.EqualTo(passes));
+    });
+
     [Test]
     public Task Code_assignment_trims_externally_added_lines_and_clear_removes_an_external_only_body() => OnSession(() =>
     {
