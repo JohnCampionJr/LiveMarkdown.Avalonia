@@ -1,0 +1,9 @@
+docs/performance-audit-2026-11-07.json
+  ai_agent 445,449,455,461,469-477
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "422b54fee8764551c68de83cf7402eb1a9b06c55",
+  "prompts": {}
+}
