@@ -1,0 +1,30 @@
+src/LiveMarkdown.Avalonia/Controls/CodeBlock.cs
+  s_39a534ffa60717::t_6cc19421e216b7 11,251,572-617,754
+src/LiveMarkdown.Avalonia/Utilities/OpenFenceAppend.cs
+  s_39a534ffa60717::t_6cc19421e216b7 25-28
+src/LiveMarkdown.Avalonia/Controls/MarkdownTextBlock.Caches.cs
+  s_39a534ffa60717::t_6cc19421e216b7 98,109
+src/LiveMarkdown.Avalonia/Controls/MarkdownTextBlock.cs
+  s_39a534ffa60717::t_6cc19421e216b7 344,381
+tests/LiveMarkdown.Avalonia.Tests/RoundFourPerformanceTests.cs
+  s_39a534ffa60717::t_9b7c35f46220d5 21-44,46-51,53-66,68-75,77-78,80-84
+  s_39a534ffa60717::t_c10ab3fd16ae62 45,52,67,76,79
+docs/performance-round-4.md
+  ai_agent 105-118
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "03683e58fbe9a2edd86976c9a8feb149744dec4c",
+  "prompts": {},
+  "sessions": {
+    "s_39a534ffa60717": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19231-69fb-79d1-8545-fbf1d4a89679",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "John Campion Jr <john@brightshore.io>"
+    }
+  }
+}
