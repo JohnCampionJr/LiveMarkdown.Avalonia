@@ -1,0 +1,85 @@
+live-markdown/src/LiveMarkdown.Avalonia/Controls/MarkdownRenderer.TextSearch.cs
+  s_39a534ffa60717::t_60d316494a78f3 111,223,225,227-229,232,342,345,347-350,352
+  s_39a534ffa60717::t_2ac2edbffda137 112,222,343-344,360-361,363,368,371-373
+  s_39a534ffa60717::t_4ee12c437f4f69 105-107,113-116,118-119,215-216,221,245-249,282,284,302-305,376-401,468
+live-markdown/tests/LiveMarkdown.Avalonia.Tests/SearchRefreshCachingTests.cs
+  s_39a534ffa60717::t_a27d5f0d79af64 1-96,100-110,112-113,116-117,121-144
+  s_39a534ffa60717::t_2ac2edbffda137 97-99,111,114-115,118-119
+  s_39a534ffa60717::t_60d316494a78f3 120
+live-markdown/src/LiveMarkdown.Avalonia/Utilities/SyntaxHighlighting.cs
+  s_39a534ffa60717::t_599febd51698f6 256-258
+  s_39a534ffa60717::t_ecca7b77f872db 71-73,212,234,238,240,248,313
+  s_39a534ffa60717::t_73f2d1444c7e4a 184-185
+  s_39a534ffa60717::t_c4b2f9e122f9d0 66-70,82-84,115,146,192,198-199,204-207,209-211,215,230,236-237,241-242,244,253-255,263-270,316,321,353-356,358,363-370,372-377,393,405-414,416-419,422-426
+  s_39a534ffa60717::t_44268101eb7b86 345-348,480-482
+live-markdown/src/LiveMarkdown.Avalonia/Controls/MarkdownTextBlock.cs
+  s_39a534ffa60717::t_695b56b2cea24c 517,543
+  s_39a534ffa60717::t_76de11269d0abc 516,2494
+live-markdown/src/LiveMarkdown.Avalonia/Controls/TableCellMeasureCache.cs
+  s_39a534ffa60717::t_695b56b2cea24c 20,24,34-36,38-39,49
+  s_39a534ffa60717::t_87cc0904e482fb 42-44
+  s_39a534ffa60717::t_76de11269d0abc 1-19,21-23,25-33,37,40-41,45-48,50-128
+live-markdown/src/LiveMarkdown.Avalonia/Utilities/SyntaxTokenCache.cs
+  s_39a534ffa60717::t_d286cd50673f59 1-27,29,31-42,44-52
+  s_39a534ffa60717::t_d40240498d40e7 28,30,43
+live-markdown/src/LiveMarkdown.Avalonia/Controls/CodeBlock.cs
+  s_39a534ffa60717::t_7b3fab675d9da3 389-394,400,515-516,519-525,527,529-532,534-537
+  s_39a534ffa60717::t_87a1681b3d2295 250-251,437,685-686,699-700,720,723-731
+  s_39a534ffa60717::t_d40240498d40e7 205-208,239-242,245-249,275,303,306,395-399,438-440,450,488-491,514,555-560,652,683,696,701-708
+  s_39a534ffa60717::t_ecca7b77f872db 511-513,517-518,526,528,533,538,644,648,693,695,698,709-711
+  s_39a534ffa60717::t_c90852a2ca8a12 413,422-423,694,697,712-714
+live-markdown/tests/LiveMarkdown.Avalonia.Tests/RenderCostTests.cs
+  s_39a534ffa60717::t_fabb2d76ff6aa7 630,632-647,649-655
+live-markdown/tests/LiveMarkdown.Avalonia.Tests/TableMeasureCacheTests.cs
+  s_39a534ffa60717::t_18fcdc5e10a175 4,21,24-25,47-48,52,85,108-115,117-118,120,122-123,125-128,232-239
+  s_39a534ffa60717::t_87cc0904e482fb 1-3,5-15,30-46,49-51,53-84,86-104,151-231,240-241
+  s_39a534ffa60717::t_913f72374e146c 105-107,129
+  s_39a534ffa60717::t_178731aae72c89 19
+  s_39a534ffa60717::t_bff39177ae0a85 116,119,121,124,130-150
+  s_39a534ffa60717::t_695b56b2cea24c 16-18,20,22-23,26-29
+live-markdown/tests/LiveMarkdown.Avalonia.Tests/CodeHighlightingPerformanceTests.cs
+  s_39a534ffa60717::t_6a30bec390fa75 49
+  s_39a534ffa60717::t_c0e741b1de8d02 149-153
+  s_39a534ffa60717::t_6bed7cc3ae1243 1-5,11-48,50-58,102-124,317-320
+  s_39a534ffa60717::t_87a1681b3d2295 221-245,247-263
+  s_39a534ffa60717::t_1463f49431ada0 246
+  s_39a534ffa60717::t_7c2d2ed5ff092f 10,125-148,154-220,264-293
+  s_39a534ffa60717::t_c90852a2ca8a12 6-9,59-101,294-316
+live-markdown/tests/LiveMarkdown.Avalonia.Tests/RamImageCacheRetentionTests.cs
+  s_39a534ffa60717::t_8594084815cacc 35-38,41-44,143,146-150
+  s_39a534ffa60717::t_d0899f40b553f8 254
+  s_39a534ffa60717::t_9e2404bac8f29e 1-34,39-40,45-142,144-145,151-253,255-316
+live-markdown/src/LiveMarkdown.Avalonia/Controls/MarkdownTableGrid.cs
+  s_39a534ffa60717::t_76de11269d0abc 2,19,22-25,27,35-51,150-152,155-157,167,192,211,213-221,293,435
+  s_39a534ffa60717::t_bff39177ae0a85 20
+  s_39a534ffa60717::t_c8c32c5b693ce5 26,28-34
+live-markdown/docs/performance-audit-2026-11-07.json
+  s_39a534ffa60717::t_145f189328effe 1-4,6-24,26-31,41-44,46-56,71-74,76-147,178-181,183-199,221-224,226-239,251-254,256-277,303-306,308-317,334-337,339-348,364-370,410-411
+  s_39a534ffa60717::t_67411a79c81dae 25,34-40,45,59-70,75,150-177,182,202-220,225,242-250,255,280-302,307,320-333,338,351-363,375-407,409
+  s_39a534ffa60717::t_7a21e069cf05a1 5,32-33,57-58,148-149,200-201,240-241,278-279,318-319,349-350,371-373
+  s_39a534ffa60717::t_a092f90958e213 374
+live-markdown/src/LiveMarkdown.Avalonia/ImageLoader/Caches/RamBasedAsyncImageLoaderCache.cs
+  s_39a534ffa60717::t_350cf9dd7eaa85 1,7,20-63,65-70,72-73,80,82,84,86,99-103,105-111,113-119,128,130-136,145,147-151,153-154,166,168,179,182-183,189,191-193,195-201,203-211,213-220,222-232,235
+live-markdown/tests/LiveMarkdown.Avalonia.Tests/PerformanceAuditProbes.cs
+  s_39a534ffa60717::t_0014cb4553ec7a 205-206,219,272,274
+  s_39a534ffa60717::t_d0899f40b553f8 128-140,142-144,150,152,281-286
+  s_39a534ffa60717::t_69c6e9d52f055a 3,51-59,145-149,151,153-154,245,249
+  s_39a534ffa60717::t_a20c12acdf26a4 1-2,4-50,60-63,93-127,141,155-204,207-218,220-244,246-248,260-271,273,275-280,287-289
+  s_39a534ffa60717::t_018a82555348b5 64-92,250-259
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "04f5fef3a9ace1fd1af58a7e3bb6760657ca54c6",
+  "prompts": {},
+  "sessions": {
+    "s_39a534ffa60717": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19231-69fb-79d1-8545-fbf1d4a89679",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "John Campion Jr <john@brightshore.io>"
+    }
+  }
+}
