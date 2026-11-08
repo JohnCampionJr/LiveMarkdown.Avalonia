@@ -20,6 +20,32 @@ namespace LiveMarkdown.Avalonia;
 /// </summary>
 public partial class MarkdownTextBlock
 {
+    private TextLayout? codeInlineGeometryLayout;
+    private Dictionary<CodeInline, IReadOnlyList<Rect>>? codeInlineGeometry;
+    internal int CodeInlineGeometryBuilds { get; private set; }
+
+    private void ClearCodeInlineGeometry()
+    {
+        codeInlineGeometryLayout = null;
+        codeInlineGeometry?.Clear();
+    }
+
+    private IReadOnlyList<Rect> GetCachedCodeInlineSpanRects(TextLayout layout, CodeInlineSpan span)
+    {
+        if (!ReferenceEquals(codeInlineGeometryLayout, layout))
+        {
+            codeInlineGeometry?.Clear();
+            codeInlineGeometryLayout = layout;
+        }
+        var cache = codeInlineGeometry ??= [];
+        if (cache.TryGetValue(span.Source, out var rects)) return rects;
+        CodeInlineGeometryBuilds++;
+        // Do not expose a mutable List/array that can corrupt subsequent pointer hit tests.
+        rects = GetCodeInlineSpanRects(layout, span).AsReadOnly();
+        cache.Add(span.Source, rects);
+        return rects;
+    }
+
     /// <summary>
     /// the <see cref="TextLayout"/> property will create a new layout if it is null, may cause a side effect.
     /// </summary>
@@ -44,11 +70,12 @@ public partial class MarkdownTextBlock
     {
         if (GetTextLayout(this) is not { } textLayout) return null;
 
-        foreach (var span in GetCodeInlineSpans())
+        foreach (var span in GetCachedCodeInlineSpans())
         {
-            foreach (var rect in GetCodeInlineSpanRects(textLayout, span))
+            var rects = GetCachedCodeInlineSpanRects(textLayout, span);
+            for (var i = 0; i < rects.Count; i++)
             {
-                if (rect.Contains(point)) return span.Source;
+                if (rects[i].Contains(point)) return span.Source;
             }
         }
 
@@ -65,9 +92,9 @@ public partial class MarkdownTextBlock
     {
         if (GetTextLayout(this) is not { } textLayout) return [];
 
-        foreach (var span in GetCodeInlineSpans())
+        foreach (var span in GetCachedCodeInlineSpans())
         {
-            if (ReferenceEquals(span.Source, inline)) return GetCodeInlineSpanRects(textLayout, span);
+            if (ReferenceEquals(span.Source, inline)) return GetCachedCodeInlineSpanRects(textLayout, span);
         }
 
         return [];
