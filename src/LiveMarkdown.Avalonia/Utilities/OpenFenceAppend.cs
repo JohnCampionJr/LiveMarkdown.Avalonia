@@ -22,8 +22,10 @@ internal sealed class OpenFenceAppend(FencedCodeBlock block, string openingLine,
             fence.ClosingFencedCharCount != 0 || fence.Column != 0 || fence.IndentCount != 0) return null;
         var start = fence.Span.Start - textOffset;
         if (start < 0 || start >= text.Length) return null;
-        var end = text.IndexOf('\n', start);
-        if (end < 0 || end - start > 4096) return null;
+        var lineLength = text.AsSpan(start).IndexOfAny('\r', '\n');
+        if (lineLength < 0 || lineLength > 4096) return null;
+        var end = start + lineLength;
+        if (text[end] == '\r' && end + 1 < text.Length && text[end + 1] == '\n') end++;
         return new OpenFenceAppend(fence, text[start..(end + 1)], index);
     }
 

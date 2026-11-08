@@ -8,6 +8,7 @@ using Avalonia.Controls.Primitives;
 using Avalonia.Input.Platform;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
+using Avalonia.LogicalTree;
 using Avalonia.Media;
 using Markdig.Syntax;
 using TextMateSharp.Grammars;
@@ -247,6 +248,7 @@ public class CodeBlock : TemplatedControl
     private int firstDirtyContentLine;
     private int firstDirtyFormattingLine;
     private bool mutableTextExposed;
+    private bool validateDetachedContent;
     internal int LastHighlightLineVisits { get; private set; }
     internal int LastDeferredChunkVisits { get; private set; }
     internal int DeferredChunkCount => deferredInlines?.Count ?? 0;
@@ -567,6 +569,52 @@ public class CodeBlock : TemplatedControl
     {
     }
 
+    /// <inheritdoc/>
+    protected override void OnAttachedToLogicalTree(LogicalTreeAttachmentEventArgs e)
+    {
+        base.OnAttachedToLogicalTree(e);
+        ValidateChunkSources();
+        validateDetachedContent = false;
+    }
+
+    /// <inheritdoc/>
+    protected override void OnDetachedFromLogicalTree(LogicalTreeAttachmentEventArgs e)
+    {
+        validateDetachedContent = true;
+        base.OnDetachedFromLogicalTree(e);
+    }
+
+    private void ValidateChunkSources()
+    {
+        if (mutableTextExposed) return;
+        // Detached text blocks release nested collection subscriptions. Validate once on
+        // attachment, or before explicitly highlighting while detached, so missed external
+        // edits cannot masquerade as authoritative source. Unchanged views keep the fast path.
+        for (var chunkIndex = 0; chunkIndex < chunks.Count; chunkIndex++)
+        {
+            var inlines = InlinesOf(chunks[chunkIndex]);
+            var firstLine = chunkIndex * LinesPerChunk;
+            var count = Math.Min(LinesPerChunk, lineTexts.Count - firstLine);
+            if (!ReferenceEquals(inlines, chunkInlineCollections[chunkIndex]) ||
+                inlines.Count != Math.Max(0, (count * 2) - 1))
+            {
+                HandleChunkContentInvalidated();
+                return;
+            }
+            for (var i = 0; i < count; i++)
+            {
+                var text = lineTexts[firstLine + i];
+                var offset = 0;
+                if ((i > 0 && inlines[(i * 2) - 1] is not LineBreak) ||
+                    !LineMatches(inlines[i * 2], text, ref offset) || offset != text.Length)
+                {
+                    HandleChunkContentInvalidated();
+                    return;
+                }
+            }
+        }
+    }
+
     private void HandleInlinesChanged(object? sender, NotifyCollectionChangedEventArgs e)
     {
         if (suspendedHighlightCount > 0 || isApplyingSyntaxHighlighting) return;
@@ -703,6 +751,7 @@ public class CodeBlock : TemplatedControl
     public void HighlightSyntax()
     {
         if (isApplyingSyntaxHighlighting) return;
+        if (validateDetachedContent) ValidateChunkSources();
         if (string.IsNullOrWhiteSpace(Language) || chunks.Count == 0) return;
 
         LastDeferredChunkVisits = 0;

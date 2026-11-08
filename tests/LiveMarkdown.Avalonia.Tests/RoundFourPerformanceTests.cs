@@ -18,6 +18,70 @@ namespace LiveMarkdown.Avalonia.Tests;
 [TestFixture, NonParallelizable]
 public class RoundFourPerformanceTests
 {
+    [TestCase("", "\r", "\n")]
+    [TestCase("prefix\n\n", "\r", "\n")]
+    [TestCase("prefix\n\n", "\r\n", "\n")]
+    public Task Mixed_line_endings_do_not_duplicate_the_open_fence_body(string prefix, string openingNewline, string bodyNewline) => OnUi(async () =>
+    {
+        using var host = new ProducerHost();
+        await host.Append(prefix + "```text" + openingNewline + "first" + bodyNewline);
+        await host.Append("second\n");
+        Assert.That(host.Producer.FenceAppendCount, Is.EqualTo(1));
+        AssertParity(host, host.Source.ToString());
+        await host.Append("third");
+        await host.Append(" partial\n");
+        AssertParity(host, host.Source.ToString());
+        await host.Append("```\n");
+        AssertParity(host, host.Source.ToString());
+    });
+
+    [Test]
+    public Task Attaching_and_reattaching_populated_code_keeps_dirty_tail_highlighting() => OnUi(() =>
+    {
+        var code = new RenderedCode { AutoSyntaxHighlight = false, Language = "csharp" };
+        for (var i = 0; i < 512; i++) code.SetLine(i, $"var reviewItem{i} = {i};");
+        code.HighlightSyntax();
+        var window = WindowFor(code);
+        var parent = window.Content;
+        try
+        {
+            window.Show(); window.UpdateLayout();
+            code.SetLine(512, "var firstTail = 1;"); code.HighlightSyntax();
+            Assert.That(code.LastHighlightLineVisits, Is.EqualTo(1), "first attachment is not a source edit");
+            window.Content = null; window.UpdateLayout();
+            window.Content = parent; window.UpdateLayout();
+            code.SetLine(513, "var secondTail = 2;"); code.HighlightSyntax();
+            Assert.That(code.LastHighlightLineVisits, Is.EqualTo(1), "an unchanged reattachment keeps authoritative lines");
+        }
+        finally { window.Close(); }
+        return Task.CompletedTask;
+    });
+
+    [TestCase(false)]
+    [TestCase(true)]
+    public Task Nested_edits_while_detached_are_validated_before_highlighting(bool highlightWhileDetached) => OnUi(() =>
+    {
+        var code = new RenderedCode { AutoSyntaxHighlight = false, Language = "csharp", Code = "var reviewValue = 1;" };
+        code.HighlightSyntax();
+        var window = WindowFor(code);
+        var parent = window.Content;
+        try
+        {
+            window.Show(); window.UpdateLayout();
+            window.Content = null; window.UpdateLayout();
+            var span = (Span)code.CodeTextBlocks[0].Inlines![0];
+            span.Inlines.Clear();
+            span.Inlines.Add(new Run("// external detached edit"));
+            if (highlightWhileDetached) code.HighlightSyntax();
+            window.Content = parent; window.UpdateLayout();
+            code.HighlightSyntax();
+            Assert.That(code.Code, Is.EqualTo("// external detached edit"));
+            Assert.That(code.LastHighlightLineVisits, Is.EqualTo(1), "detached nested edits cannot reuse stale authoritative lines");
+        }
+        finally { window.Close(); }
+        return Task.CompletedTask;
+    });
+
     [TestCase("```", "\n", "")]
     [TestCase("~~~~", "\r\n", "intro\n\n# Heading\n\n")]
     [TestCase("````", "\n", "intro\n\n")]

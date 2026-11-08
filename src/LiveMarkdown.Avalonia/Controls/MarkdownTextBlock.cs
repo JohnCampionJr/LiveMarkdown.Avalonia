@@ -341,7 +341,7 @@ public partial class MarkdownTextBlock : SelectableTextBlock
         SubscribeToHighlightStyles(null);
         inlineCachesDetached = true;
         ObserveInlineContent(null);
-        InvalidateInlineContent();
+        InvalidateInlineContent(notifyMutation: false);
         _paintSnapshot = TextPaintSnapshot.Empty;
         _paintSnapshotTextRuns = null;
         _paintSnapshotDirty = true;
@@ -378,7 +378,7 @@ public partial class MarkdownTextBlock : SelectableTextBlock
         base.OnAttachedToLogicalTree(e);
         inlineCachesDetached = false;
         ObserveInlineContent(Inlines);
-        InvalidateInlineContent(); // content may have changed while detached
+        InvalidateInlineContent(notifyMutation: false); // discard caches without claiming an edit
         SubscribeToHighlightStyles(HighlightStyles);
     }
 

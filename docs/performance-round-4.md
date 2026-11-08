@@ -102,6 +102,20 @@ though that code was not changed, so no image improvement is attributed to this 
   rebuild aggregates; range-stable tail edits reuse them. Private block caches clear on full
   rebind, off-tree updates, detach and clear where no projection needs them.
 
+## PR #6 review follow-up
+
+- [x] Extract exactly one opening Markdown line for LF, CRLF or bare CR. Mixed CR-opener/LF-body
+  inputs keep body lines and source coordinates identical to a full parse through partial
+  appends and closing fences. The shortcut remains enabled for these valid inputs.
+- [x] Separate actual content mutation notifications from logical attach/detach cache resets.
+  Validate code chunks once on attachment, and before explicit highlighting while detached,
+  because detached text blocks have released their nested collection subscriptions. Unchanged
+  views retain authoritative line metadata; detected external edits use the conservative path.
+- Six new deterministic cases cover both bugs and detached nested edits. The original behavior
+  duplicated the first body line and visited 514 lines after reattachment instead of one.
+  With the fixes, **74 focused tests passed**, including all **25 round-four regression cases**.
+  The initial 196-test run below describes the PR's first revision.
+
 ## Validation and artifacts
 
 - **196 focused tests passed**, including all 19 new cases, parser parity, raster equality,
