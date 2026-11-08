@@ -13,6 +13,9 @@ public class RawAsyncImageLoaderHandler : AsyncImageLoaderHandler
     public static RawAsyncImageLoaderHandler Shared { get; } = new();
 
     /// <inheritdoc/>
+    public override bool CoalesceConcurrentLoads => false;
+
+    /// <inheritdoc/>
     public override IEnumerable<string> SupportedSchemes => [string.Empty];
 
     private RawAsyncImageLoaderHandler() { }

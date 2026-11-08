@@ -135,14 +135,8 @@ public class MarkdownUpdateProducerTests
 
     private async Task<MarkdownDocumentUpdate> WaitForUpdateAsync(Task<MarkdownDocumentUpdate> updateTask)
     {
-        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        while (!updateTask.IsCompleted)
-        {
-            await Task.Delay(10, cancellation.Token);
-            await session.Dispatch(static () => { }, cancellation.Token);
-        }
-
-        return await updateTask;
+        // Keep the dispatcher pumping until the actual producer notification arrives.
+        return await session.Dispatch(async () => await updateTask, CancellationToken.None);
     }
 
     private sealed class CallbackObserver(Action<MarkdownDocumentUpdate> onNext) : IObserver<MarkdownDocumentUpdate>

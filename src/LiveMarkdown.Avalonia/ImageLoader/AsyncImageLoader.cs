@@ -117,6 +117,18 @@ public static class AsyncImageLoader
 
     private readonly static Dictionary<Image, (Task task, CancellationTokenSource cts)> ImageLoadTasks = new();
 
+    // Work-count/synchronization seams for deterministic coalescing tests and explicit benchmarks.
+    internal static Action<Uri, int>? SharedLoadJoinedObserver;
+    internal static int SharedLoadStarts => ImageLoadCoordinator.Starts;
+    internal static int SharedLoadJoins => ImageLoadCoordinator.Joins;
+    internal static int ActiveSharedLoadCount => ImageLoadCoordinator.ActiveCount;
+    internal static Task PendingLoadFor(Image image) => ImageLoadTasks[image].task;
+
+    private readonly record struct DecodedImage(IImage? Image, bool Owned)
+    {
+        internal void DisposeIfOwned() { if (Owned && Image is IDisposable disposable) disposable.Dispose(); }
+    }
+
     static AsyncImageLoader()
     {
         SourceProperty.Changed.AddClassHandler<Image>(HandleSourceChanged);
@@ -211,8 +223,9 @@ public static class AsyncImageLoader
         AsyncImageLoaderCache? cache,
         CancellationTokenSource cts)
     {
-        IImage? result = null;
+        DecodedImage result = default;
         var shouldApply = false;
+        var applied = false;
 
         try
         {
@@ -242,18 +255,20 @@ public static class AsyncImageLoader
 
                     if (shouldApply && !cts.IsCancellationRequested)
                     {
-                        image.Source = result;
-                        ApplySizeToContent(image, result);
+                        image.Source = result.Image;
+                        applied = true; // ownership has transferred, even if sizing subsequently fails
+                        ApplySizeToContent(image, result.Image);
                     }
                 });
         }
         finally
         {
-            cts.Dispose();
+            try { if (!applied) result.DisposeIfOwned(); }
+            finally { cts.Dispose(); }
         }
     }
 
-    private static async Task<IImage?> LoadImageAsync(
+    private static async Task<DecodedImage> LoadImageAsync(
         Image image,
         Uri uri,
         AsyncImageLoaderHandler handler,
@@ -263,70 +278,104 @@ public static class AsyncImageLoader
     {
         AsyncImageLoaderCacheEntry? cachedEntry = null;
         AsyncImageLoaderResponse? response = null;
-
+        DecodedImage decoded = default;
         try
         {
-            cachedEntry = cache is null ? null : await cache.GetAsync(uri, cancellationToken);
-            if (cachedEntry is not null && cachedEntry.Metadata.IsFresh(DateTimeOffset.UtcNow))
+            try
             {
-                var cachedImage = await DecodeAsync(image, cachedEntry.Stream, uri, decoders, cancellationToken);
-                if (cachedImage is not null)
+                cachedEntry = cache is null ? null : await cache.GetAsync(uri, cancellationToken);
+                if (cachedEntry is not null && cachedEntry.Metadata.IsFresh(DateTimeOffset.UtcNow))
                 {
-                    return cachedImage;
+                    decoded = await DecodeAsync(image, cachedEntry.Stream, uri, decoders, cancellationToken);
+                    if (decoded.Image is not null) return decoded;
+                    await cache!.RemoveAsync(uri, cancellationToken);
+                    await cachedEntry.DisposeAsync();
+                    cachedEntry = null;
                 }
 
-                await cache!.RemoveAsync(uri, cancellationToken);
-                await cachedEntry.DisposeAsync();
-                cachedEntry = null;
+                if (cachedEntry is null && handler.CoalesceConcurrentLoads)
+                    return decoded = await LoadColdImageAsync(image, uri, handler, decoders, cache, cancellationToken);
+
+                // Stale entries may carry handler-specific validation state. Keep that path local
+                // to its consumer rather than coalescing incompatible metadata snapshots.
+                response = await handler.LoadAsync(uri, cachedEntry?.Metadata, cancellationToken);
+                if (response.IsNotModified)
+                {
+                    if (cachedEntry is null) return default;
+                    await cache!.TouchAsync(uri, response.Metadata, cancellationToken);
+                    decoded = await DecodeAsync(image, cachedEntry.Stream, uri, decoders, cancellationToken);
+                    if (decoded.Image is null) await cache.RemoveAsync(uri, cancellationToken);
+                    return decoded;
+                }
+                if (response.Stream is null) return default;
+                var seekableStream = await EnsureSeekableStreamAsync(response.Stream, cancellationToken);
+                try
+                {
+                    if (seekableStream.Length == 0) return default;
+                    decoded = await DecodeAsync(image, seekableStream, uri, decoders, cancellationToken);
+                    if (decoded.Image is not null && cache is not null)
+                    {
+                        seekableStream.Position = 0;
+                        await cache!.SetAsync(uri, seekableStream, response.Metadata, cancellationToken);
+                    }
+                    return decoded;
+                }
+                finally
+                {
+                    // The response owns its original stream; only a separate buffering copy is ours.
+                    if (!ReferenceEquals(seekableStream, response.Stream)) await seekableStream.DisposeAsync();
+                }
             }
-
-            response = await handler.LoadAsync(uri, cachedEntry?.Metadata, cancellationToken);
-            if (response.IsNotModified)
+            finally
             {
-                if (cachedEntry is null) return null;
-
-                if (cache is not null)
-                {
-                    await cache.TouchAsync(uri, response.Metadata, cancellationToken);
-                }
-
-                var cachedImage = await DecodeAsync(image, cachedEntry.Stream, uri, decoders, cancellationToken);
-                if (cachedImage is null && cache is not null)
-                {
-                    await cache.RemoveAsync(uri, cancellationToken);
-                }
-
-                return cachedImage;
-            }
-
-            if (response.Stream is null) return null;
-
-            await using (var seekableStream = await EnsureSeekableStreamAsync(response.Stream, cancellationToken))
-            {
-                if (seekableStream.Length == 0) return null;
-
-                var decodedImage = await DecodeAsync(image, seekableStream, uri, decoders, cancellationToken);
-                if (decodedImage is not null && cache is not null)
-                {
-                    seekableStream.Position = 0;
-                    await cache.SetAsync(uri, seekableStream, response.Metadata, cancellationToken);
-                }
-
-                return decodedImage;
+                try { if (cachedEntry is not null) await cachedEntry.DisposeAsync(); }
+                finally { if (response is not null) await response.DisposeAsync(); }
             }
         }
-        finally
+        catch
         {
-            if (cachedEntry is not null)
-            {
-                await cachedEntry.DisposeAsync();
-            }
-
-            if (response is not null)
-            {
-                await response.DisposeAsync();
-            }
+            decoded.DisposeIfOwned();
+            throw;
         }
+    }
+
+    private static async Task<DecodedImage> LoadColdImageAsync(
+        Image image, Uri uri, AsyncImageLoaderHandler handler, IReadOnlyCollection<IImageDecoder> decoders,
+        AsyncImageLoaderCache? cache, CancellationToken cancellationToken)
+    {
+        using var lease = ImageLoadCoordinator.Acquire(uri, handler, cache,
+            token => FetchColdBytesAsync(uri, handler, token), cancellationToken);
+        DecodedImage decoded = default;
+        try
+        {
+            SharedLoadJoinedObserver?.Invoke(uri, lease.JoinedConsumerCount);
+            var payload = await lease.GetAsync(cancellationToken);
+            if (payload is null) return default;
+            await using var stream = payload.Open();
+            decoded = await DecodeAsync(image, stream, uri, decoders, cancellationToken);
+            if (decoded.Image is not null) await lease.PublishAsync(payload, cache, cancellationToken);
+            return decoded;
+        }
+        catch
+        {
+            decoded.DisposeIfOwned();
+            throw;
+        }
+    }
+
+    private static async Task<ImageLoadCoordinator.Payload?> FetchColdBytesAsync(
+        Uri uri, AsyncImageLoaderHandler handler, CancellationToken cancellationToken)
+    {
+        await using var response = await handler.LoadAsync(uri, null, cancellationToken);
+        if (response.IsNotModified || response.Stream is null) return null;
+        if (response.Stream.CanSeek) response.Stream.Position = 0;
+        // Own one immutable encoded buffer per flight. Each view receives its own cursor and
+        // performs its own decode, so target-specific decoder options and native lifetimes stay local.
+        using var memory = new MemoryStream();
+        await response.Stream.CopyToAsync(memory, cancellationToken);
+        if (memory.Length == 0) return null;
+        memory.TryGetBuffer(out var bytes);
+        return new ImageLoadCoordinator.Payload(bytes.Array!, bytes.Offset, bytes.Count, response.Metadata.Clone());
     }
 
     private static async Task<Stream> EnsureSeekableStreamAsync(Stream stream, CancellationToken cancellationToken)
@@ -343,7 +392,7 @@ public static class AsyncImageLoader
         return memoryStream;
     }
 
-    private static async Task<IImage?> DecodeAsync(
+    private static async Task<DecodedImage> DecodeAsync(
         Image image,
         Stream stream,
         Uri uri,
@@ -364,10 +413,10 @@ public static class AsyncImageLoader
             var result = await decoder.TryDecodeAsync(image, stream, uri, cancellationToken);
             if (result is not null)
             {
-                return result;
+                return new DecodedImage(result, decoder.OwnsDecodedImage(result));
             }
         }
 
-        return null;
+        return default;
     }
 }

@@ -73,6 +73,10 @@ public abstract class MarkdownDocumentUpdate
         /// </summary>
         public long BaseVersion { get; }
 
+        // Only the producer can supply this proof: its splice kept these exact top-level
+        // blocks, in order, without reparsing them. Public deltas retain conservative traversal.
+        internal int? UnchangedPrefixBlockCount { get; }
+
         /// <summary>
         /// Initializes an incremental parsed state.
         /// </summary>
@@ -82,11 +86,20 @@ public abstract class MarkdownDocumentUpdate
         public Incremental(
             MarkdownDocumentUpdate previous,
             MarkdownDocument document,
-            in ObservableStringBuilderChangedEventArgs change) : base(document, change)
+            in ObservableStringBuilderChangedEventArgs change) : this(previous, document, change, null)
+        {
+        }
+
+        internal Incremental(
+            MarkdownDocumentUpdate previous,
+            MarkdownDocument document,
+            in ObservableStringBuilderChangedEventArgs change,
+            int? unchangedPrefixBlockCount) : base(document, change)
         {
             ArgumentNullException.ThrowIfNull(previous);
             BaseVersion = previous.Version;
             baseIdentity = previous.identity;
+            UnchangedPrefixBlockCount = unchangedPrefixBlockCount;
         }
 
         private readonly object baseIdentity;

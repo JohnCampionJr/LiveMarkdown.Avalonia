@@ -74,7 +74,15 @@ partial class MarkdownRenderer
             return field;
         }
 
-        private set => SetAndRaise(RenderedTextProjectionProperty, ref field, value);
+        private set
+        {
+            if (value is null)
+            {
+                _projectionSnapshot = null;
+                _projectedBlocks = [];
+            }
+            SetAndRaise(RenderedTextProjectionProperty, ref field, value);
+        }
     }
 
     /// <summary>
@@ -123,6 +131,8 @@ partial class MarkdownRenderer
 
     /// <summary>Whether anything has ever read <see cref="RenderedTextProjection"/>.</summary>
     private bool _renderedTextProjectionWanted;
+    private MarkdownTextProjection? _projectionSnapshot;
+    private MarkdownTextBlock[] _projectedBlocks = [];
 
     /// <summary>
     /// Finds and paints all matches produced by a caller-supplied matcher.
@@ -281,6 +291,24 @@ partial class MarkdownRenderer
 
     private MarkdownTextProjection CreateRenderedTextProjection(long sourceVersion, MarkdownTextBlock[] blocks)
     {
+        if (_projectionSnapshot is { } previous && previous.SourceVersion == sourceVersion &&
+            _projectedBlocks.Length == blocks.Length && previous.Buffers.Count == blocks.Length)
+        {
+            var unchanged = true;
+            for (var i = 0; i < blocks.Length; i++)
+            {
+                var block = blocks[i];
+                var buffer = previous.Buffers[i];
+                var text = block.LayoutText;
+                if (!ReferenceEquals(_projectedBlocks[i], block) || !buffer.SourceSpan.Equals(block.SourceSpan) ||
+                    !ReferenceEquals(buffer.Text.Text, text) || buffer.Text.Start != 0 || buffer.Text.Length != text.Length)
+                {
+                    unchanged = false;
+                    break;
+                }
+            }
+            if (unchanged) return previous;
+        }
         RenderedTextProjectionBuilds++;
         var buffers = new MarkdownTextBuffer[blocks.Length];
         for (var i = 0; i < blocks.Length; i++)
@@ -289,7 +317,8 @@ partial class MarkdownRenderer
             buffers[i] = new MarkdownTextBuffer(block.SourceSpan, new StringSlice(block.LayoutText));
         }
 
-        return new MarkdownTextProjection(sourceVersion, buffers);
+        _projectedBlocks = blocks;
+        return _projectionSnapshot = new MarkdownTextProjection(sourceVersion, buffers);
     }
 
     private void ApplyTextSearchCore(MarkdownTextBlock[] blocks)

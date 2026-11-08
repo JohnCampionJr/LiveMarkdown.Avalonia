@@ -1,5 +1,6 @@
 ﻿using Avalonia.Controls;
 using Avalonia.Controls.Documents;
+using Markdig.Helpers;
 using Markdig.Syntax;
 
 namespace LiveMarkdown.Avalonia;
@@ -15,6 +16,16 @@ public class CodeBlockNode : BlockNode<Markdig.Syntax.CodeBlock>
     public override Control Control { get; }
 
     private readonly CodeBlock _codeBlock;
+    private readonly List<int> linePositions = [];
+    private bool orderedLinePositions;
+    private Type? previousBlockType;
+    private int previousBlockStart;
+    private int previousBlockColumn;
+    private int appendBoundary = int.MaxValue;
+
+    // Work counters for renderer/node-level benchmarks; no elapsed-time assertions are needed.
+    internal static long LineInspections;
+    internal static long LineSearchComparisons;
 
     /// <summary>
     /// Initializes a code block node and its control.
@@ -57,6 +68,20 @@ public class CodeBlockNode : BlockNode<Markdig.Syntax.CodeBlock>
         // ReSharper disable once ConditionIsAlwaysTrueOrFalseAccordingToNullableAPIContract
         if (codeBlock.Lines.Lines is null) return false;
 
+        cancellationToken.ThrowIfCancellationRequested();
+        var sourceOffset = codeBlock.GetData(IncrementalParse.CodeLineSourceOffsetKey) as int?;
+        var firstLine = 0;
+        var structuralChange = previousBlockType != codeBlock.GetType() || previousBlockStart != codeBlock.Span.Start ||
+            previousBlockColumn != codeBlock.Column || linePositions.Count == 0 || change.StartIndex < linePositions[0];
+        if (!structuralChange && sourceOffset.HasValue && orderedLinePositions && linePositions.Count == _codeBlock.LineCount &&
+            (codeBlock.GetType() == typeof(FencedCodeBlock) || codeBlock.GetType() == typeof(Markdig.Syntax.CodeBlock)))
+        {
+            firstLine = change.StartIndex >= appendBoundary && codeBlock.Lines.Count >= linePositions.Count
+                ? linePositions.Count
+                : FindLine(change.StartIndex);
+            firstLine = Math.Min(firstLine, codeBlock.Lines.Count);
+        }
+
         _codeBlock.SourceSpan = codeBlock.Span;
 
         // One highlight pass for the whole rewrite, below, rather than one per mutation: the control
@@ -64,21 +89,39 @@ public class CodeBlockNode : BlockNode<Markdig.Syntax.CodeBlock>
         using var highlightScope = _codeBlock.SuspendSyntaxHighlighting();
 
         var lineCount = codeBlock.Lines.Count;
-        for (var lineIndex = 0; lineIndex < lineCount; lineIndex++)
+        if (firstLine == 0) orderedLinePositions = true;
+        if (linePositions.Count > firstLine) linePositions.RemoveRange(firstLine, linePositions.Count - firstLine);
+        for (var lineIndex = firstLine; lineIndex < lineCount; lineIndex++)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            LineInspections++;
 
-            var slice = codeBlock.Lines.Lines[lineIndex].Slice;
+            var line = codeBlock.Lines.Lines[lineIndex];
+            var slice = line.Slice;
+            var position = line.Position + (sourceOffset ?? 0);
+            if (linePositions.Count > 0 && position <= linePositions[^1]) orderedLinePositions = false;
+            linePositions.Add(position);
 
             // A line the change cannot have reached keeps what it has, which for a streaming block
             // is every line but the last. The control decides which text block holds it.
-            if (lineIndex < _codeBlock.LineCount &&
-                (slice.End < change.StartIndex || change.StartIndex + change.Length <= slice.Start)) continue;
+            if (!structuralChange && lineIndex < _codeBlock.LineCount &&
+                (slice.End + (sourceOffset ?? 0) < change.StartIndex || change.StartIndex + change.Length <= slice.Start + (sourceOffset ?? 0))) continue;
 
             _codeBlock.SetLine(lineIndex, slice.ToString());
         }
 
         _codeBlock.TrimLines(lineCount);
+        previousBlockType = codeBlock.GetType();
+        previousBlockStart = codeBlock.Span.Start;
+        previousBlockColumn = codeBlock.Column;
+        appendBoundary = int.MaxValue;
+        if (lineCount > 0)
+        {
+            var last = codeBlock.Lines.Lines[lineCount - 1];
+            var newlineLength = last.NewLine == NewLine.CarriageReturnLineFeed ? 2 : last.NewLine == NewLine.None ? 0 : 1;
+            if (newlineLength > 0)
+                appendBoundary = Math.Max(last.Position - 1, last.Slice.End) + (sourceOffset ?? 0) + newlineLength + 1;
+        }
 
         // Highlighting only works for closed FencedCodeBlock with Info
         if (codeBlock is not FencedCodeBlock fencedCodeBlock) return true;
@@ -87,5 +130,19 @@ public class CodeBlockNode : BlockNode<Markdig.Syntax.CodeBlock>
         _codeBlock.HighlightSyntax();
 
         return true;
+    }
+
+    private int FindLine(int sourcePosition)
+    {
+        var low = 0;
+        var high = linePositions.Count;
+        while (low < high)
+        {
+            LineSearchComparisons++;
+            var middle = low + ((high - low) >> 1);
+            if (linePositions[middle] <= sourcePosition) low = middle + 1;
+            else high = middle;
+        }
+        return Math.Max(0, low - 1);
     }
 }

@@ -13,6 +13,9 @@ public class DataUrlAsyncImageLoaderHandler : AsyncImageLoaderHandler
     public static DataUrlAsyncImageLoaderHandler Shared { get; } = new();
 
     /// <inheritdoc/>
+    public override bool CoalesceConcurrentLoads => false;
+
+    /// <inheritdoc/>
     public override IEnumerable<string> SupportedSchemes => ["data"];
 
     private DataUrlAsyncImageLoaderHandler() { }

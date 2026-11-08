@@ -51,7 +51,11 @@ def run(args):
     if output == log or output.exists() or log.exists():
         raise ValueError("Choose a new .json output path; existing reports/logs are never overwritten")
     output.parent.mkdir(parents=True, exist_ok=True)
-    fixture = repo / "tests/LiveMarkdown.Avalonia.Tests/RepeatableRenderingBenchmarks.cs"
+    round3 = args.suite == "round3"
+    fixture_name = "RoundThreeBenchmarks" if round3 else "RepeatableRenderingBenchmarks"
+    method = "Fixed_round_three_workloads" if round3 else "Fixed_rendering_workloads"
+    expected_scenarios = 7 if round3 else 6
+    fixture = repo / f"tests/LiveMarkdown.Avalonia.Tests/{fixture_name}.cs"
     host = repo / "tests/LiveMarkdown.Avalonia.Tests/MarkdownPointerSelectionTests.cs"
     session = repo / "tests/LiveMarkdown.Avalonia.Tests/HeadlessSession.cs"
     digest = hashlib.sha256(b"\0".join(path.read_bytes() for path in (fixture, host, session))).hexdigest()
@@ -61,17 +65,17 @@ def run(args):
     env.update(LM_BENCHMARK_OUTPUT=str(output), LM_BENCHMARK_HARNESS_SHA256=digest,
                LM_BENCHMARK_REVISION=revision + (" (dirty)" if dirty else ""))
     command = ["dotnet", "test", "tests/LiveMarkdown.Avalonia.Tests/LiveMarkdown.Avalonia.Tests.csproj",
-               "-c", "Release", "--filter", "FullyQualifiedName~RepeatableRenderingBenchmarks.Fixed_rendering_workloads",
+               "-c", "Release", "--filter", f"FullyQualifiedName~{fixture_name}.{method}",
                "--logger", "console;verbosity=detailed"]
     command += [f"-p:{value}" for value in args.msbuild_property]
-    print(f"Running six workloads only; full output: {log}", flush=True)
+    print(f"Running {expected_scenarios} workloads only; full output: {log}", flush=True)
     with log.open("x") as stream:
         result = subprocess.run(command, cwd=repo, env=env, stdout=stream, stderr=subprocess.STDOUT)
     if result.returncode or not output.exists():
         raise ValueError(f"Benchmark failed (exit {result.returncode}); inspect {log}")
     report = json.loads(output.read_text())
     # Prove the runner got the intended fixture rather than a successful zero-test invocation.
-    if report["harnessSha256"] != digest or len(report["scenarios"]) != 6:
+    if report["harnessSha256"] != digest or len(report["scenarios"]) != expected_scenarios:
         raise ValueError(f"Unexpected benchmark report; inspect {log}")
     print(f"Report: {output}")
 
@@ -82,6 +86,7 @@ def main():
     runner = commands.add_parser("run")
     runner.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[1])
     runner.add_argument("--output", type=Path, required=True)
+    runner.add_argument("--suite", choices=("rendering", "round3"), default="rendering")
     runner.add_argument("--msbuild-property", action="append", default=[], metavar="NAME=VALUE")
     comparison = commands.add_parser("compare")
     comparison.add_argument("before", type=Path)

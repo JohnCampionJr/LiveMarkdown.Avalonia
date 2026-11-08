@@ -6,6 +6,13 @@
 public abstract class AsyncImageLoaderHandler
 {
     /// <summary>
+    /// Gets whether concurrent cold loads may share one fetch and encoded-byte buffer. HTTP and
+    /// custom handlers default to true. Local/resource/data handlers disable this to preserve their
+    /// direct seekable-stream decoding path. Disable it for target-specific or unbuffered sources.
+    /// </summary>
+    public virtual bool CoalesceConcurrentLoads => true;
+
+    /// <summary>
     /// Supported URI schemes (e.g., "http", "https", "file").
     /// </summary>
     public abstract IEnumerable<string> SupportedSchemes { get; }
