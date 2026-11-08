@@ -1,0 +1,109 @@
+tests/LiveMarkdown.Avalonia.Tests/PerformanceRoundThreeProbes.cs
+  s_39a534ffa60717::t_93826da873fcd8 122-123,125-127,133-134,136-138,140,143,149-151,153,156-158,161-184,186
+  s_39a534ffa60717::t_4e514ad217a19d 1-5,7-23,25-28,30-32,34-74,78-96,98-103,106,108-121,124,139,141-142,144-148,155,159-160,185,187-197,199-229
+  s_39a534ffa60717::t_9a752e44b66a3c 6,33,75-77,104-105
+  s_39a534ffa60717::t_0d31a5a75bcafd 24,29
+  s_39a534ffa60717::t_c9732743440eef 97,107,128-132,135,152,154,198
+tests/LiveMarkdown.Avalonia.Tests/RoundThreeImageLoadTests.cs
+  s_39a534ffa60717::t_a420cec37a1bae 1-67,69-73,88-93,95,97,99,101,103,105-170,173-252,287-289,292-296,298-316,318-383,389-398
+  s_39a534ffa60717::t_14909073dbf654 253-268,270-271,274-278,285-286,290-291,297
+  s_39a534ffa60717::t_772715fd508a2c 269,272-273,279-284
+  s_39a534ffa60717::t_4567491e241fee 171-172,384-388
+  s_39a534ffa60717::t_b8eb76dfeb3cc6 75,77-83,86-87
+  s_39a534ffa60717::t_e4b16a7d8a0aa0 68,74,76,84-85,94,96,98,100,102,104,317
+tests/LiveMarkdown.Avalonia.Tests/RoundThreeBenchmarks.cs
+  s_39a534ffa60717::t_2b72ae82d50f2f 1-130,134-305
+  s_39a534ffa60717::t_4bf8b4f5897c18 131-133
+tests/LiveMarkdown.Avalonia.Tests/MarkdownUpdateProducerTests.cs
+  s_39a534ffa60717::t_0763c1550f80f8 138-139
+src/LiveMarkdown.Avalonia/ImageLoader/ImageLoadCoordinator.cs
+  s_39a534ffa60717::t_647317153c9253 1-7,9-59,61-79,81-129,133-145
+  s_39a534ffa60717::t_6700e5fe8753b7 8,60,80,130-132
+src/LiveMarkdown.Avalonia/Utilities/MarkdownDocumentUpdate.cs
+  s_39a534ffa60717::t_50490696af323c 76-79,89-97,102,112
+src/LiveMarkdown.Avalonia/Utilities/MarkdownUpdateProducer.cs
+  s_39a534ffa60717::t_50490696af323c 280,294,305,336,399
+  s_39a534ffa60717::t_9291a7315ae65f 289,300,311-313
+src/LiveMarkdown.Avalonia/ImageLoader/Handlers/AsyncImageLoaderHandler.cs
+  s_39a534ffa60717::t_14909073dbf654 9-14
+src/LiveMarkdown.Avalonia/Controls/MarkdownListGrid.cs
+  s_39a534ffa60717::t_11294490ffbea0 2,16-17,19,57-60,70,73-80,85-86,143-154,177,188
+  s_39a534ffa60717::t_64383c45fe53ec 18,61-69,71-72
+src/LiveMarkdown.Avalonia/Controls/MarkdownRenderer.cs
+  s_39a534ffa60717::t_50490696af323c 235-237
+src/LiveMarkdown.Avalonia/ImageLoader/Handlers/DataUrlAsyncImageLoaderHandler.cs
+  s_39a534ffa60717::t_14909073dbf654 16-17
+src/LiveMarkdown.Avalonia/Nodes/Block/ContainerBlockNode.cs
+  s_39a534ffa60717::t_50490696af323c 28-30,57-63,65-70,76,79-85,89-90,92-95,105,108-118
+tests/LiveMarkdown.Avalonia.Tests/RoundThreeDiskCacheTests.cs
+  s_39a534ffa60717::t_40382123888255 214
+  s_39a534ffa60717::t_650b1d5b82b931 1-168,170-207,220-252,262-263
+  s_39a534ffa60717::t_ee32d415d90cdf 169
+  s_39a534ffa60717::t_4ab00d2e26f500 208-213,215-219,253-261
+src/LiveMarkdown.Avalonia/Utilities/IncrementalParse.cs
+  s_39a534ffa60717::t_50490696af323c 43-45,112,135-137,139,154
+  s_39a534ffa60717::t_e331798d8869cf 58-59,61-62
+  s_39a534ffa60717::t_b109fa34957c2d 60,111
+  s_39a534ffa60717::t_1787dc9bd78d39 29
+src/LiveMarkdown.Avalonia/ImageLoader/Handlers/AvaloniaResourceAsyncImageLoaderHandler.cs
+  s_39a534ffa60717::t_14909073dbf654 16-17
+tests/LiveMarkdown.Avalonia.Tests/AsyncImageLoaderCacheTests.cs
+  s_39a534ffa60717::t_3b4b2acce1c45f 338-342,344-355,357
+src/LiveMarkdown.Avalonia/ImageLoader/Caches/ImageCacheEntryLockRegistry.cs
+  s_39a534ffa60717::t_6d57bbb0bbfcfd 1-60
+src/LiveMarkdown.Avalonia/ImageLoader/Handlers/LocalFileAsyncImageLoaderHandler.cs
+  s_39a534ffa60717::t_14909073dbf654 14-15
+src/LiveMarkdown.Avalonia/ImageLoader/Handlers/RawAsyncImageLoaderHandler.cs
+  s_39a534ffa60717::t_14909073dbf654 16-17
+src/LiveMarkdown.Avalonia/Controls/MarkdownRenderer.TextSearch.cs
+  s_39a534ffa60717::t_fbc3d363c6df65 77-85,134-135,294-311,320-321
+src/LiveMarkdown.Avalonia/Nodes/Block/CodeBlockNode.cs
+  s_39a534ffa60717::t_e331798d8869cf 3,19-28,71-84,92-94,97,99-103,107-108,114-124,134-148
+src/LiveMarkdown.Avalonia/ImageLoader/Caches/FileBasedAsyncImageLoaderCache.cs
+  s_39a534ffa60717::t_ee32d415d90cdf 601-605
+  s_39a534ffa60717::t_4385bdc29326cb 530-546
+  s_39a534ffa60717::t_56847666015d56 35-42,76-79,117,140-141,143-144,147-152,154,174,177-178,180-181,183,185-195,197,203,211,223,228,234,249-255,311,343,362,372,377,499-500,503-505,508-509,511,514-517,520-523,526,528-529,549-553,556,558-559,561-564,566,568-571,573-574,578,580-586,588-591,594-596,598-600,606,608-613,757,824,828,832,846-849,851,855-856
+  s_39a534ffa60717::t_fcffe44787635d 110-114,182,196,199-201,632,981
+  s_39a534ffa60717::t_4ab00d2e26f500 146,501,507,518,525,617,619,627,636-638
+src/LiveMarkdown.Avalonia/ImageLoader/Decoders/IImageDecoder.cs
+  s_39a534ffa60717::t_6700e5fe8753b7 21-31
+  s_39a534ffa60717::t_c600a645bd39a8 15-16
+docs/rendering-benchmark.md
+  s_39a534ffa60717::t_1787dc9bd78d39 55-66
+docs/performance-round-3.md
+  s_39a534ffa60717::t_44b6d1ee4a865b 1-27,30-69,75-91
+  s_39a534ffa60717::t_1787dc9bd78d39 28-29,70-74
+tests/LiveMarkdown.Avalonia.Tests/RoundThreeStreamingTests.cs
+  s_39a534ffa60717::t_80f23c3ec97690 11,134,151,200-201
+  s_39a534ffa60717::t_9291a7315ae65f 1-10,12-113,115-117,123-133,135-150,152-157,178-199,202-217,224-304
+  s_39a534ffa60717::t_2e9049a8f1487f 114,118-122,218-223
+  s_39a534ffa60717::t_57b4df696bce1b 158-177
+tools/rendering-benchmark.py
+  s_39a534ffa60717::t_2f3656c56895ef 54-58,68,71,78,89
+tests/LiveMarkdown.Avalonia.Tests/RoundThreeLayoutTests.cs
+  s_39a534ffa60717::t_64383c45fe53ec 1-162
+src/LiveMarkdown.Avalonia/ImageLoader/AsyncImageLoader.cs
+  s_39a534ffa60717::t_036294710bccd5 120-131,226,228,258-260,271,281,284,286-287,289-293,297,299-300,302,305-308,310,329,335-340,342-357,359-378,395,416,420
+  s_39a534ffa60717::t_4567491e241fee 266-267,311-312,314-315,317-321,323,325-326,331-332
+  s_39a534ffa60717::t_14909073dbf654 296,301,304,316
+src/LiveMarkdown.Avalonia/ImageLoader/Decoders/DefaultBitmapDecoder.cs
+  s_39a534ffa60717::t_6700e5fe8753b7 18-19
+src/LiveMarkdown.Avalonia/Nodes/Block/DocumentNode.cs
+  s_39a534ffa60717::t_50490696af323c 15-28,73
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "4045dc583b6c1fac4c3a7ab023a1ce676d4734ec",
+  "prompts": {},
+  "sessions": {
+    "s_39a534ffa60717": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19231-69fb-79d1-8545-fbf1d4a89679",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "John Campion Jr <john@brightshore.io>"
+    }
+  }
+}
