@@ -63,10 +63,14 @@ public sealed class SyntaxHighlighting
     }
 
     private const int BlockCacheCap = 1024;
-    private static readonly Dictionary<(string Language, string Text), TokenizedBlock> BlockCache = [];
-    private static readonly object BlockCacheLock = new();
-    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<InlineCollection, TokenizedBlock> LiveBlocks = new();
-    private readonly object _tokenizeLock = new();
+    private static readonly SyntaxTokenCache<TokenizedBlock> BlockCache = new(
+        BlockCacheCap, weightLimit: 16L * 1024 * 1024, entryWeightLimit: 512L * 1024);
+    private readonly System.Runtime.CompilerServices.ConditionalWeakTable<InlineCollection, TokenizedBlock> liveBlocks = new();
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<IGrammar, object> GrammarGates = new();
+    private readonly object _tokenizeLock;
+    internal int GrammarLockAcquisitions { get; private set; }
+    internal bool IsGrammarLockHeld => Monitor.IsEntered(_tokenizeLock);
+    internal Action<int>? LineTokenizedObserver { get; set; }
 
 #if NET10_0_OR_GREATER
     private static readonly Lock ThemeCacheLock = new();
@@ -75,6 +79,9 @@ public sealed class SyntaxHighlighting
 #endif
 
     private readonly IGrammar? _grammar;
+    internal int LastFormattingLineVisits { get; private set; }
+    internal static int ThemeRevision => Volatile.Read(ref themeRevision);
+    private static int themeRevision;
 
     static SyntaxHighlighting()
     {
@@ -105,6 +112,7 @@ public sealed class SyntaxHighlighting
 
         lock (ThemeCacheLock)
         {
+            Interlocked.Increment(ref themeRevision);
             var rawThemes = CustomThemeRegistrations.ToDictionary(
                 static pair => pair.Key,
                 static pair => pair.Value.RawTheme,
@@ -135,6 +143,7 @@ public sealed class SyntaxHighlighting
         lock (ThemeCacheLock)
         {
             if (!CustomThemeRegistrations.Remove(name)) return false;
+            Interlocked.Increment(ref themeRevision);
 
             var rawThemes = CustomThemeRegistrations.ToDictionary(
                 static pair => pair.Key,
@@ -172,47 +181,39 @@ public sealed class SyntaxHighlighting
 
     /// <summary>
     /// Tokenizes <paramref name="text"/> now and keeps the result, so the first code block with this text
-    /// formats from cache. Safe to call from any thread: tokenization holds the grammar's lock, and the
-    /// UI thread waits at most one line's worth behind it.
+    /// formats from cache. Safe to call from any thread: only one line holds the shared grammar gate at a time;
+    /// fully reused foreground tokens do not enter that gate.
     /// </summary>
     public void Prewarm(string text)
     {
         if (_grammar is null || string.IsNullOrEmpty(text)) return;
         var lines = text.Split('\n');
         if (lines.Length > 0 && lines[^1].Length == 0) Array.Resize(ref lines, lines.Length - 1);
-        TokenizeBlock(lines, previous: null);
+        TokenizeBlock(lines, previous: null, firstDirtyLine: null, out _);
     }
 
     /// <summary>Tokens for <paramref name="lines"/>: from the block cache if this exact text was seen, else
     /// extended from <paramref name="previous"/> (a live block that grew) where the lines still match, else
     /// tokenized from the top. The result is cached under the full text.</summary>
-    private TokenizedBlock TokenizeBlock(IReadOnlyList<string> lines, TokenizedBlock? previous)
+    private TokenizedBlock TokenizeBlock(
+        IReadOnlyList<string> lines, TokenizedBlock? previous, int? firstDirtyLine, out int reusedLines)
     {
-        // How much of the last tokenization of this same collection still stands. Decided FIRST,
-        // because it decides whether the cross-block cache below is worth consulting at all: keying
-        // that cache means joining the whole block into one string and hashing it, and a streaming
-        // block would pay that on every appended line to look up a key nothing has ever stored.
         var reuse = 0;
         if (previous is not null)
         {
-            while (reuse < lines.Count && reuse < previous.Lines.Count && string.Equals(lines[reuse], previous.Lines[reuse], StringComparison.Ordinal)) reuse++;
+            if (firstDirtyLine is { } dirty)
+                reuse = Math.Min(Math.Max(0, dirty), Math.Min(lines.Count, previous.Lines.Count));
+            else
+                while (reuse < lines.Count && reuse < previous.Lines.Count && string.Equals(lines[reuse], previous.Lines[reuse], StringComparison.Ordinal)) reuse++;
         }
+        reusedLines = reuse;
 
-        // A block seen for the first time -- freshly created, or recycled by a virtualizing host --
-        // reuses nothing, and is exactly the case the cross-block cache exists for.
+        // Fully reused blocks never consult the grammar gate, even while a worker warms another block.
+        if (previous is not null && reuse == lines.Count && previous.Lines.Count == lines.Count) return previous;
+
         (string Language, string Text)? key = reuse == 0 ? (_languageName, string.Join('\n', lines)) : null;
-        if (key is { } lookup)
-        {
-            lock (BlockCacheLock)
-            {
-                if (BlockCache.TryGetValue(lookup, out var hit)) return hit;
-            }
-        }
+        if (key is { } lookup && BlockCache.TryGetValue(lookup, out var hit)) return hit!;
 
-        // A streaming block grows by a line at a time, and rebuilding its token lists to add one
-        // costs an entry per line of the whole block on every append. When the previous tokens are
-        // this collection's own -- not something the cross-block cache is keyed on -- they are
-        // extended in place instead, which is what makes an append cost the lines it actually added.
         TokenizedBlock block;
         if (previous is { Shared: false })
         {
@@ -226,39 +227,47 @@ public sealed class SyntaxHighlighting
         }
         else
         {
-            block = new TokenizedBlock();
-            for (var i = 0; i < reuse; i++)
-            {
-                block.Lines.Add(previous!.Lines[i]);
-                block.Tokens.Add(previous.Tokens[i]);
-                block.StackAfter.Add(previous.StackAfter[i]);
-            }
+            block = CopyPrefix(previous, reuse);
         }
 
         var stack = reuse > 0 ? block.StackAfter[reuse - 1] : null;
-        lock (_tokenizeLock)
+        for (var i = reuse; i < lines.Count; i++)
         {
-            for (var i = reuse; i < lines.Count; i++)
+            // Rule stacks belong to each block; only the grammar call needs serialization. The
+            // callback/publication point is outside the gate, allowing foreground work between lines.
+            lock (_tokenizeLock)
             {
-                var result = _grammar!.TokenizeLine(lines[i], stack, TimeSpan.MaxValue);
+                GrammarLockAcquisitions++;
+                var text = lines[i];
+                var result = _grammar!.TokenizeLine(text, stack, TimeSpan.MaxValue);
                 stack = result.RuleStack;
-                block.Lines.Add(lines[i]);
+                block.Lines.Add(text);
                 block.Tokens.Add(result.Tokens);
                 block.StackAfter.Add(stack);
             }
+            LineTokenizedObserver?.Invoke(i);
         }
 
         if (key is { } store)
         {
-            lock (BlockCacheLock)
-            {
-                if (BlockCache.Count >= BlockCacheCap) BlockCache.Clear();   // a simple bound; a whole document fits many times over
-                BlockCache[store] = block;
-                block.Shared = true;   // keyed by its text now, so it may no longer be grown in place
-            }
+            long weight = 2L * store.Text.Length;
+            for (var i = 0; i < block.Lines.Count; i++)
+                weight += 2L * block.Lines[i].Length + 16L * block.Tokens[i].Length + 16;
+            // Publish immutable state before another thread can observe the cache entry.
+            block.Shared = true;
+            if (!BlockCache.Store(store, block, weight)) block.Shared = false;
         }
-
         return block;
+    }
+
+    private static TokenizedBlock CopyPrefix(TokenizedBlock? source, int count)
+    {
+        var copy = new TokenizedBlock();
+        if (source is null) return copy;
+        copy.Lines.AddRange(source.Lines.Take(count));
+        copy.Tokens.AddRange(source.Tokens.Take(count));
+        copy.StackAfter.AddRange(source.StackAfter.Take(count));
+        return copy;
     }
 
     private static ThemeCacheEntry GetBuiltInThemeCacheEntry(ThemeName themeName)
@@ -301,13 +310,15 @@ public sealed class SyntaxHighlighting
     /// <param name="languageName"></param>
     private readonly string _languageName;
 
-    private SyntaxHighlighting(string languageName)
+    internal SyntaxHighlighting(string languageName)
     {
         _languageName = languageName;
+        _tokenizeLock = new object();
         var scopeName = RegistryOptions.GetScopeByLanguageId(languageName) ?? RegistryOptions.GetScopeByExtension('.' + languageName);
         if (scopeName == null) return;
 
         _grammar = Registry.LoadGrammar(scopeName);
+        if (_grammar is not null) _tokenizeLock = GrammarGates.GetValue(_grammar, static _ => new object());
     }
 
     /// <summary>
@@ -331,27 +342,40 @@ public sealed class SyntaxHighlighting
     /// <param name="chunks">The inline collections holding the block's lines, in order.</param>
     /// <param name="themeName">The built-in fallback theme.</param>
     /// <param name="customThemeName">An optional registered custom theme name.</param>
+    /// <param name="knownLineTexts">The current plain source lines, when the caller retains them.</param>
+    /// <param name="firstDirtyLine">The first changed source line, or null to compare the prior tokenized source.</param>
+    /// <param name="fixedLinesPerChunk">The authoritative fixed chunk size, used only with known source lines.</param>
+    /// <param name="firstFormattingLine">The first line needing styling, independently of source-token changes.</param>
     internal void FormatInlines(
         IReadOnlyList<InlineCollection> chunks,
         ThemeName themeName = ThemeName.DarkPlus,
         string? customThemeName = null,
-        IReadOnlyList<string>? knownLineTexts = null)
+        IReadOnlyList<string>? knownLineTexts = null,
+        int? firstDirtyLine = null,
+        int? fixedLinesPerChunk = null,
+        int? firstFormattingLine = null)
     {
+        LastFormattingLineVisits = 0;
         if (_grammar is null || chunks.Count == 0) return;
 
         var theme = ResolveTheme(themeName, customThemeName);
 
-        // Where each chunk's lines begin. A chunk alternates line, break, line, so its inline count
-        // gives its line count, and a line index then resolves to its inline by arithmetic. Walking
-        // the inlines to build that map instead cost a list entry per line of the whole block on
-        // every append, when what needs formatting is almost always just the tail.
-        var chunkFirstLine = new int[chunks.Count + 1];
-        for (var c = 0; c < chunks.Count; c++)
+        // CodeBlock supplies fixed-size chunks and authoritative line dirtiness. That path needs
+        // neither a per-append chunk map nor a scan over the unchanged source prefix. Other callers
+        // retain the safe comparison path because their collections can have arbitrary shapes.
+        var fixedChunks = fixedLinesPerChunk is > 0 && knownLineTexts is not null;
+        int[]? chunkFirstLine = null;
+        int lineCount;
+        if (fixedChunks) lineCount = knownLineTexts!.Count;
+        else
         {
-            chunkFirstLine[c + 1] = chunkFirstLine[c] + ((chunks[c].Count + 1) / 2);
+            chunkFirstLine = new int[chunks.Count + 1];
+            for (var c = 0; c < chunks.Count; c++)
+                chunkFirstLine[c + 1] = chunkFirstLine[c] + ((chunks[c].Count + 1) / 2);
+            lineCount = chunkFirstLine[chunks.Count];
+            firstDirtyLine = null;
+            firstFormattingLine = null;
         }
-
-        var lineCount = chunkFirstLine[chunks.Count];
         if (lineCount == 0) return;
 
         // Tokenizing needs every line's text, in order, to carry the rule stack through the block.
@@ -366,7 +390,7 @@ public sealed class SyntaxHighlighting
             var built = new List<string>(lineCount);
             for (var li = 0; li < lineCount; li++)
             {
-                built.Add(InlineAt(chunks, chunkFirstLine, li) switch
+                built.Add(InlineAt(chunks, chunkFirstLine!, li) switch
                 {
                     Run r => r.Text ?? "",
                     Span sp => TextOf(sp),
@@ -378,17 +402,28 @@ public sealed class SyntaxHighlighting
         }
 
         // Kept against the FIRST collection, which identifies the block for as long as it lives.
-        LiveBlocks.TryGetValue(chunks[0], out var previous);
-        var block = TokenizeBlock(lines, previous);
-        LiveBlocks.AddOrUpdate(chunks[0], block);
+        liveBlocks.TryGetValue(chunks[0], out var previous);
+        var block = TokenizeBlock(lines, previous, firstDirtyLine, out var reusedLines);
+        // A renderer gets its own mutable token lists at first realization. Appending later then
+        // extends those lists instead of copying a shared cache entry's entire prefix mid-stream.
+        if (block.Shared) block = CopyPrefix(block, block.Lines.Count);
+        liveBlocks.AddOrUpdate(chunks[0], block);
 
-        var chunkIndex = 0;
-        for (var li = 0; li < lineCount; li++)
+        var startLine = Math.Max(0, Math.Min(firstFormattingLine ?? firstDirtyLine ?? 0, lineCount));
+        var chunkIndex = fixedChunks ? startLine / fixedLinesPerChunk!.Value : 0;
+        for (var li = startLine; li < lineCount; li++)
         {
-            while (li >= chunkFirstLine[chunkIndex + 1]) chunkIndex++;
+            LastFormattingLineVisits++;
+            if (!fixedChunks)
+                while (li >= chunkFirstLine![chunkIndex + 1]) chunkIndex++;
+            else chunkIndex = li / fixedLinesPerChunk!.Value;
 
             var inlines = chunks[chunkIndex];
-            var i = (li - chunkFirstLine[chunkIndex]) * 2;
+            var i = (fixedChunks ? li % fixedLinesPerChunk!.Value : li - chunkFirstLine![chunkIndex]) * 2;
+            // A changed grammar state can affect otherwise unchanged later lines. Those suffix
+            // lines must be restyled too, even if the old line was already a Span or marked Run.
+            if (li >= reusedLines && (inlines[i] is Span || inlines[i] is Run formatted && IsRunFormatted(formatted)))
+                inlines[i] = new Run(lines[li]);
             if (inlines[i] is not Run { Text: { } line } run) continue;
             if (IsRunFormatted(run)) continue;
             var tokens = block.Tokens[li];
@@ -441,13 +476,10 @@ public sealed class SyntaxHighlighting
         }
     }
 
-    /// <summary>
-    /// Applies styling to a Run based on the token's scopes and the current theme.
-    /// </summary>
-    /// <param name="run">The Run to style.</param>
-    /// <param name="scopes">The scopes associated with the token.</param>
-    /// <param name="theme">The resolved theme to use for styling.</param>
     /// <summary>The inline holding a line, found by arithmetic rather than by walking.</summary>
+    /// <param name="chunks">The ordered chunk collections.</param>
+    /// <param name="chunkFirstLine">The first line of each chunk, followed by the total line count.</param>
+    /// <param name="line">The source line to locate.</param>
     private static Inline? InlineAt(IReadOnlyList<InlineCollection> chunks, int[] chunkFirstLine, int line)
     {
         var chunk = 0;

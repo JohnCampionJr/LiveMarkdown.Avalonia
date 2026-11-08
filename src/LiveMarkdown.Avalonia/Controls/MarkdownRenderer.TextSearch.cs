@@ -102,11 +102,21 @@ partial class MarkdownRenderer
     /// construction — including a caller that re-applies the SAME delegate instance after changing what it
     /// captured, which delegate identity alone would not catch.</summary>
     private int _textSearchGeneration;
+    // A text block can be moved between renderers. Generations must distinguish their matchers too,
+    // rather than accidentally accepting another renderer's first-query memo as our first query.
+    private static int nextTextSearchGeneration;
     private string _textSearchHighlightName = DefaultTextSearchHighlightName;
     private string? _textSearchAppliedHighlightName;
     private int _textSearchPriority;
-    private HashSet<MarkdownTextBlock>? _textSearchAppliedBlocks;
+    private Dictionary<MarkdownTextBlock, TextHighlight>? _textSearchAppliedHighlights;
+    private Dictionary<MarkdownTextBlock, TextHighlight>? _textSearchSpareHighlights;
+    private readonly record struct SearchBlockState(MarkdownTextBlock Block, string Text,
+        IReadOnlyList<TextHighlightRange> Ranges, TextHighlight? Highlight);
+    private SearchBlockState[] _textSearchSnapshot = [];
+    private int _textSearchSnapshotGeneration;
     private long? _pendingRenderedTextStateVersion;
+    internal int RenderedTextBlockCollections { get; private set; }
+    internal int RenderedTextProjectionBuilds { get; private set; }
 
     /// <summary>The document version of the last completed layout, or null before the first one.</summary>
     private long? _renderedTextStateVersion;
@@ -202,19 +212,24 @@ partial class MarkdownRenderer
     private void SetTextSearchMatcher(TextSearchMatcher? matcher)
     {
         _textSearchMatcher = matcher;
-        _textSearchGeneration++;
+        _textSearchGeneration = Interlocked.Increment(ref nextTextSearchGeneration);
+        _textSearchSnapshot = [];
     }
 
     private void ClearAppliedTextSearch()
     {
-        if (_textSearchAppliedBlocks is { } appliedBlocks)
+        _textSearchSnapshot = [];
+        _textSearchSpareHighlights?.Clear();
+        if (_textSearchAppliedHighlights is { } appliedHighlights)
         {
-            foreach (var block in appliedBlocks)
+            foreach (var (block, applied) in appliedHighlights)
             {
-                block.Highlights.Remove(_textSearchAppliedHighlightName ?? _textSearchHighlightName);
+                var name = _textSearchAppliedHighlightName ?? _textSearchHighlightName;
+                if (block.Highlights.TryGetValue(name, out var current) && ReferenceEquals(current, applied))
+                    block.Highlights.Remove(name);
             }
 
-            appliedBlocks.Clear();
+            appliedHighlights.Clear();
         }
 
         _textSearchAppliedHighlightName = null;
@@ -227,8 +242,11 @@ partial class MarkdownRenderer
         TextSearchMatches = [];
     }
 
-    private MarkdownTextBlock[] GetTextBlocksInRenderer() =>
-        [.. GetRenderedMarkdownTextBlockDescendants(documentNode.Control)];
+    private MarkdownTextBlock[] GetTextBlocksInRenderer()
+    {
+        RenderedTextBlockCollections++;
+        return [.. GetRenderedMarkdownTextBlockDescendants(documentNode.Control)];
+    }
 
     internal void InvalidateRenderedTextState()
     {
@@ -261,8 +279,9 @@ partial class MarkdownRenderer
         if (wantsSearch) ApplyTextSearchCore(blocks);
     }
 
-    private static MarkdownTextProjection CreateRenderedTextProjection(long sourceVersion, MarkdownTextBlock[] blocks)
+    private MarkdownTextProjection CreateRenderedTextProjection(long sourceVersion, MarkdownTextBlock[] blocks)
     {
+        RenderedTextProjectionBuilds++;
         var buffers = new MarkdownTextBuffer[blocks.Length];
         for (var i = 0; i < blocks.Length; i++)
         {
@@ -279,6 +298,11 @@ partial class MarkdownRenderer
         {
             return;
         }
+
+        // Memoized matching alone still rebuilt dictionaries, a hash set, and every match on each
+        // unchanged refresh. Preserve the aggregate result as well. Check registry identities so
+        // externally replaced/removed highlights are repaired just as on a normal search pass.
+        if (CanReuseTextSearchResults(blocks)) return;
 
         var pendingRanges = new Dictionary<MarkdownTextBlock, IReadOnlyList<TextHighlightRange>>();
         var matches = new List<TextHighlightMatch>();
@@ -315,15 +339,17 @@ partial class MarkdownRenderer
 
         var previousHighlightName = _textSearchAppliedHighlightName;
 
-        if (_textSearchAppliedBlocks is { } appliedBlocks)
+        var appliedHighlights = _textSearchAppliedHighlights ??= new();
+        var nextAppliedHighlights = _textSearchSpareHighlights ??= new();
+        nextAppliedHighlights.Clear();
+        foreach (var (block, applied) in appliedHighlights)
         {
-            foreach (var block in appliedBlocks)
+            if (previousHighlightName is not null &&
+                (!pendingRanges.ContainsKey(block) || previousHighlightName != _textSearchHighlightName)
+                && block.Highlights.TryGetValue(previousHighlightName, out var current)
+                && ReferenceEquals(current, applied))
             {
-                if (previousHighlightName is not null &&
-                    (!pendingRanges.ContainsKey(block) || previousHighlightName != _textSearchHighlightName))
-                {
-                    block.Highlights.Remove(previousHighlightName);
-                }
+                block.Highlights.Remove(previousHighlightName);
             }
         }
 
@@ -331,17 +357,48 @@ partial class MarkdownRenderer
         {
             if (block.Highlights.TryGetValue(_textSearchHighlightName, out var existing) &&
                 existing.Priority == _textSearchPriority &&
-                existing.Ranges.SequenceEqual(ranges))
+                existing.Ranges.SequenceEqual(ranges) &&
+                appliedHighlights.TryGetValue(block, out var owned) && ReferenceEquals(existing, owned))
             {
+                nextAppliedHighlights[block] = existing;
                 continue;
             }
 
             block.Highlights.Set(_textSearchHighlightName, ranges, _textSearchPriority);
+            if (block.Highlights.TryGetValue(_textSearchHighlightName, out var highlight)) nextAppliedHighlights[block] = highlight;
         }
 
-        _textSearchAppliedBlocks = [.. pendingRanges.Keys];
+        appliedHighlights.Clear(); // the spare keeps capacity, never references to retired blocks
+        _textSearchAppliedHighlights = nextAppliedHighlights;
+        _textSearchSpareHighlights = appliedHighlights;
         _textSearchAppliedHighlightName = pendingRanges.Count > 0 ? _textSearchHighlightName : null;
         TextSearchMatches = matches;
+        var snapshot = new SearchBlockState[blocks.Length];
+        for (var i = 0; i < blocks.Length; i++)
+        {
+            var block = blocks[i];
+            var memo = block.SearchMemo!.Value;
+            block.Highlights.TryGetValue(_textSearchHighlightName, out var highlight);
+            snapshot[i] = new(block, memo.Text, memo.Ranges, highlight);
+        }
+        _textSearchSnapshot = snapshot;
+        _textSearchSnapshotGeneration = _textSearchGeneration;
+    }
+
+    private bool CanReuseTextSearchResults(MarkdownTextBlock[] blocks)
+    {
+        if (_textSearchSnapshotGeneration != _textSearchGeneration || _textSearchSnapshot.Length != blocks.Length) return false;
+        for (var i = 0; i < blocks.Length; i++)
+        {
+            var block = blocks[i];
+            var state = _textSearchSnapshot[i];
+            if (!ReferenceEquals(state.Block, block) || !ReferenceEquals(state.Text, block.LayoutText)
+                || block.SearchMemo is not { } memo || memo.Generation != _textSearchGeneration
+                || !ReferenceEquals(memo.Text, state.Text) || !ReferenceEquals(memo.Ranges, state.Ranges)) return false;
+            block.Highlights.TryGetValue(_textSearchHighlightName, out var highlight);
+            if (!ReferenceEquals(state.Highlight, highlight)) return false;
+        }
+        return true;
     }
 
     private IReadOnlyList<TextHighlightMatch> ApplyTextSearch<TState>(
