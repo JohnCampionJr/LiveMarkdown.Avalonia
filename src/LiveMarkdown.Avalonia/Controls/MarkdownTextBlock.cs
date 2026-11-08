@@ -134,10 +134,12 @@ public partial class MarkdownTextBlock : SelectableTextBlock
     private string? _layoutText;
 
     /// <summary>
-    /// Shaped chips, kept for the life of the block and keyed on everything their shape depends on.
-    /// Dropped when the typography changes, which is the one thing that invalidates all of them.
+    /// Shaped chips used by the current paint snapshot, keyed on everything their shape depends on.
+    /// Old streaming revisions are retired when the next snapshot completes.
     /// </summary>
-    private readonly Dictionary<CodeInlineShapeKey, ShapedCodeInline?> codeInlineShapes = [];
+    private readonly CodeInlineShapeCache codeInlineShapes = new();
+    internal int CodeInlineShapeCount => codeInlineShapes.Count;
+    internal int CodeInlineShapeMisses => codeInlineShapes.Misses;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="MarkdownTextBlock"/> class.
@@ -145,6 +147,7 @@ public partial class MarkdownTextBlock : SelectableTextBlock
     public MarkdownTextBlock()
     {
         Highlights.Changed += HandleHighlightsChanged;
+        ObserveInlineContent(Inlines);
     }
 
     /// <summary>
@@ -164,7 +167,7 @@ public partial class MarkdownTextBlock : SelectableTextBlock
     /// occupy one <see cref="MarkdownTextProjection.ObjectReplacementCharacter"/> position; their
     /// child text blocks use independent layouts.
     /// </summary>
-    public string LayoutText => _layoutText ??= Inlines is { Count: > 0 } inlines ? inlines.LayoutText : Text ?? string.Empty;
+    public string LayoutText => GetLayoutText();
 
     /// <summary>
     /// What the renderer's active text search last found in THIS block, and what it found it in — the
@@ -298,6 +301,8 @@ public partial class MarkdownTextBlock : SelectableTextBlock
 
     static MarkdownTextBlock()
     {
+        Run.TextProperty.Changed.AddClassHandler<Run>(static (run, _) => InvalidateParentInlineContent(run));
+        Span.InlinesProperty.Changed.AddClassHandler<Span>(static (span, _) => InvalidateParentInlineContent(span, collectionChanged: true));
         CopyingToClipboardEvent.AddClassHandler<MarkdownTextBlock>(
             async void (o, e) =>
             {
@@ -333,7 +338,9 @@ public partial class MarkdownTextBlock : SelectableTextBlock
     protected override void OnDetachedFromLogicalTree(LogicalTreeAttachmentEventArgs e)
     {
         SubscribeToHighlightStyles(null);
-        _layoutText = null;
+        inlineCachesDetached = true;
+        ObserveInlineContent(null);
+        InvalidateInlineContent();
         _paintSnapshot = TextPaintSnapshot.Empty;
         _paintSnapshotTextRuns = null;
         _paintSnapshotDirty = true;
@@ -368,6 +375,9 @@ public partial class MarkdownTextBlock : SelectableTextBlock
     protected override void OnAttachedToLogicalTree(LogicalTreeAttachmentEventArgs e)
     {
         base.OnAttachedToLogicalTree(e);
+        inlineCachesDetached = false;
+        ObserveInlineContent(Inlines);
+        InvalidateInlineContent(); // content may have changed while detached
         SubscribeToHighlightStyles(HighlightStyles);
     }
 
@@ -377,7 +387,10 @@ public partial class MarkdownTextBlock : SelectableTextBlock
         base.OnPropertyChanged(change);
 
         if (change.Property == TextProperty || change.Property == InlinesProperty)
-            _layoutText = null;
+        {
+            if (change.Property == InlinesProperty && !inlineCachesDetached) ObserveInlineContent(Inlines);
+            InvalidateInlineContent();
+        }
 
         if (change.Property == IsVisibleProperty)
         {
@@ -613,7 +626,7 @@ public partial class MarkdownTextBlock : SelectableTextBlock
         if (_textRuns is { } textRuns)
         {
             var snapshot = GetPaintSnapshot(textRuns);
-            textSource = new MarkdownInlinesTextSource(textRuns, snapshot, textStyles);
+            textSource = new MarkdownInlinesTextSource(textRuns, snapshot, textStyles, GetRunOffsets(textRuns));
         }
         else
         {
@@ -1035,9 +1048,17 @@ public partial class MarkdownTextBlock : SelectableTextBlock
             return _paintSnapshot;
         }
 
-        _paintSnapshot = textRuns is null ?
-            TextPaintSnapshot.Empty :
-            TextPaintSnapshot.Create(textRuns, GetCodeInlineSpans(), GetDotInlineSpans(), FlowDirection, LetterSpacing, codeInlineShapes);
+        if (textRuns is null)
+        {
+            codeInlineShapes.Clear();
+            _paintSnapshot = TextPaintSnapshot.Empty;
+        }
+        else
+        {
+            codeInlineShapes.BeginSnapshot();
+            _paintSnapshot = TextPaintSnapshot.Create(textRuns, GetCachedCodeInlineSpans(), GetDotInlineSpans(), FlowDirection, LetterSpacing, codeInlineShapes);
+            codeInlineShapes.CompleteSnapshot();
+        }
         _paintSnapshotTextRuns = textRuns;
         _paintSnapshotDirty = false;
         return _paintSnapshot;
@@ -1049,108 +1070,8 @@ public partial class MarkdownTextBlock : SelectableTextBlock
     /// <returns></returns>
     public CodeInlineSpan[] GetCodeInlineSpans()
     {
-        if (Inlines is not { Count: > 0 } inlines)
-        {
-            return [];
-        }
-
-        List<CodeInlineSpan>? spans = null;
-        var currentIndex = 0;
-
-        foreach (var inline in inlines)
-        {
-            AppendInline(inline);
-        }
-
-        return spans is null ? [] : spans.ToArray();
-
-        void AppendInline(Inline inline)
-        {
-            switch (inline)
-            {
-                case CodeInline codeInline:
-                {
-                    var text = codeInline.Text ?? string.Empty;
-                    var start = currentIndex;
-                    currentIndex += text.Length;
-                    spans ??= [];
-                    spans.Add(
-                        new CodeInlineSpan(
-                            start,
-                            text.Length,
-                            codeInline,
-                            codeInline.Background,
-                            codeInline.CornerRadius,
-                            codeInline.Padding,
-                            codeInline.Margin));
-                    break;
-                }
-                case Run run:
-                    currentIndex += run.Text?.Length ?? 0;
-                    break;
-                case Span span:
-                    foreach (var childInline in span.Inlines)
-                    {
-                        AppendInline(childInline);
-                    }
-
-                    break;
-                case LineBreak:
-                    currentIndex += Environment.NewLine.Length;
-                    break;
-                case InlineUIContainer:
-                    // InlineUIContainer is represented by an object replacement character in
-                    // the parent TextLayout. Its child remains a separate text layout.
-                    currentIndex += TextRun.DefaultTextSourceLength;
-                    break;
-            }
-        }
-    }
-
-    /// <summary>The dots in this block, in text order, with where each sits in its layout text.</summary>
-    private DotInlineSpan[] GetDotInlineSpans()
-    {
-        if (Inlines is not { Count: > 0 } inlines)
-        {
-            return [];
-        }
-
-        List<DotInlineSpan>? spans = null;
-        var currentIndex = 0;
-
-        foreach (var inline in inlines)
-        {
-            AppendInline(inline);
-        }
-
-        return spans is null ? [] : spans.ToArray();
-
-        void AppendInline(Inline inline)
-        {
-            switch (inline)
-            {
-                case DotInline dot:
-                    (spans ??= []).Add(new DotInlineSpan(currentIndex, dot.Text?.Length ?? 0, dot));
-                    currentIndex += dot.Text?.Length ?? 0;
-                    break;
-                case Run run:
-                    currentIndex += run.Text?.Length ?? 0;
-                    break;
-                case Span span:
-                    foreach (var childInline in span.Inlines)
-                    {
-                        AppendInline(childInline);
-                    }
-
-                    break;
-                case LineBreak:
-                    currentIndex += Environment.NewLine.Length;
-                    break;
-                case InlineUIContainer:
-                    currentIndex += TextRun.DefaultTextSourceLength;
-                    break;
-            }
-        }
+        var spans = GetCachedCodeInlineSpans();
+        return spans.Length == 0 ? [] : (CodeInlineSpan[])spans.Clone();
     }
 
     private TextLineGeometry[] GetLineGeometry()
@@ -1494,7 +1415,7 @@ public partial class MarkdownTextBlock : SelectableTextBlock
             IReadOnlyList<DotInlineSpan> dotInlineSpans,
             FlowDirection flowDirection,
             double letterSpacing,
-            Dictionary<CodeInlineShapeKey, ShapedCodeInline?> shapeCache)
+            CodeInlineShapeCache shapeCache)
         {
             List<TextPaintSpan>? backgroundSpans = null;
             List<CodeInlineLayout>? codeInlineLayouts = null;
@@ -1817,7 +1738,7 @@ public partial class MarkdownTextBlock : SelectableTextBlock
             double letterSpacing,
             double leftSpacing,
             double rightSpacing,
-            Dictionary<CodeInlineShapeKey, ShapedCodeInline?> cache,
+            CodeInlineShapeCache cache,
             [NotNullWhen(true)] out CodeInlineLayout? layout)
         {
             var key = new CodeInlineShapeKey(
@@ -1863,7 +1784,7 @@ public partial class MarkdownTextBlock : SelectableTextBlock
             FlowDirection flowDirection,
             double letterSpacing,
             double width,
-            Dictionary<CodeInlineShapeKey, ShapedCodeInline?> cache,
+            CodeInlineShapeCache cache,
             [NotNullWhen(true)] out CodeInlineLayout? layout)
         {
             var key = new CodeInlineShapeKey(
@@ -2259,6 +2180,7 @@ public partial class MarkdownTextBlock : SelectableTextBlock
     internal void InvalidateInlineDecorations(bool affectsLayout = false)
     {
         _paintSnapshotDirty = true;
+        InvalidateInlineSpanCache();
 
         if (affectsLayout)
         {
@@ -2325,29 +2247,14 @@ public partial class MarkdownTextBlock : SelectableTextBlock
         public MarkdownInlinesTextSource(
             IReadOnlyList<TextRun> textRuns,
             TextPaintSnapshot paintSnapshot,
-            TextStyleSnapshot textStyles)
+            TextStyleSnapshot textStyles,
+            (int Start, int RunIndex)[] runOffsets)
         {
             this.textRuns = textRuns;
             this.paintSnapshot = paintSnapshot;
             this.textStyles = textStyles;
 
-            var count = 0;
-            for (var index = 0; index < textRuns.Count; index++)
-            {
-                if (textRuns[index].Length > 0) count++;
-            }
-
-            runOffsets = count == 0 ? [] : new (int, int)[count];
-            var position = 0;
-            var next = 0;
-            for (var index = 0; index < textRuns.Count; index++)
-            {
-                var length = textRuns[index].Length;
-                if (length <= 0) continue;
-
-                runOffsets[next++] = (position, index);
-                position += length;
-            }
+            this.runOffsets = runOffsets;
         }
 
         public TextRun GetTextRun(int textSourceIndex)
@@ -2487,7 +2394,6 @@ public partial class MarkdownTextBlock : SelectableTextBlock
     /// <inheritdoc/>
     protected override void OnMeasureInvalidated()
     {
-        _layoutText = null;
         var textRuns = _textRuns;
         base.OnMeasureInvalidated();
         _textRuns = textRuns;
