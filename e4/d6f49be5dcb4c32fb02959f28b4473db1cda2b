@@ -1,0 +1,29 @@
+tools/test_rendering_benchmark.py
+  s_39a534ffa60717::t_cb80438e11cb85 1-61
+docs/performance-audit-2026-11-07.json
+  s_39a534ffa60717::t_b23edf15664cc0 410-422
+tools/rendering-benchmark.py
+  s_39a534ffa60717::t_cb80438e11cb85 1-96
+docs/rendering-benchmark.md
+  s_39a534ffa60717::t_cb80438e11cb85 1-52
+tests/LiveMarkdown.Avalonia.Tests/RepeatableRenderingBenchmarks.cs
+  s_39a534ffa60717::t_1415095fbf400a 74-77
+  s_39a534ffa60717::t_c0005e7398dfad 1-72,78-117,119-221
+  s_39a534ffa60717::t_e436e43e9d66c4 73,118
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "e4d6f49be5dcb4c32fb02959f28b4473db1cda2b",
+  "prompts": {},
+  "sessions": {
+    "s_39a534ffa60717": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19231-69fb-79d1-8545-fbf1d4a89679",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "John Campion Jr <john@brightshore.io>"
+    }
+  }
+}
