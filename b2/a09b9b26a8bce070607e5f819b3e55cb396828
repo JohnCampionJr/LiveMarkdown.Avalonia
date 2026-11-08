@@ -1,0 +1,23 @@
+docs/performance-audit-2026-11-07.json
+  ai_agent 443-469
+src/LiveMarkdown.Avalonia/Controls/CodeBlock.cs
+  s_39a534ffa60717::t_46f3b7dc719dda 276-285,452-454,545-547,706-709
+tests/LiveMarkdown.Avalonia.Tests/CodeHighlightingPerformanceTests.cs
+  s_39a534ffa60717::t_8509bca1d6d0b7 220-292
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "b2a09b9b26a8bce070607e5f819b3e55cb396828",
+  "prompts": {},
+  "sessions": {
+    "s_39a534ffa60717": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19231-69fb-79d1-8545-fbf1d4a89679",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "John Campion Jr <john@brightshore.io>"
+    }
+  }
+}
