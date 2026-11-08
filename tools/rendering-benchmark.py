@@ -34,8 +34,12 @@ def compare(before, after):
             delta = f"{(right / left - 1) * 100:+.1f}%" if left else "n/a (zero baseline)"
             lines.append(f"  {metric}: {left:,.3f} -> {right:,.3f} ({delta})")
         for counter in samples[0]["work"]:
-            left = sorted({item["work"][counter] for item in samples})
-            right = sorted({item["work"][counter] for item in candidate})
+            def values(items):
+                numbers = {item["work"][counter] for item in items}
+                known = sorted(value for value in numbers if value is not None)
+                return str(known) + (" (unavailable in some/all samples)" if None in numbers else "")
+            left = values(samples)
+            right = values(candidate)
             lines.append(f"  {counter}: {left} -> {right}")
     return "\n".join(lines)
 

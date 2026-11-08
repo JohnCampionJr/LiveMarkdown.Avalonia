@@ -417,7 +417,28 @@
     "warmupsPerWorkload": 2,
     "samplesPerWorkload": 7,
     "timingAssertions": false,
-    "validation": "Two fresh-process Release runs passed all correctness checks; work-counter values were identical across every measured sample in both runs. Four deterministic report-comparison tests passed.",
-    "scope": "Warm-cache synchronous UI work, allocations and timings; does not measure retained/native memory, background work, cold start or GPU presentation."
+    "validation": "Two sequential original/optimized Release pairs passed all six workloads; five deterministic comparator tests passed. Historical source and dependencies were unchanged; only the identical harness was copied into the original worktree.",
+    "scope": "Warm-cache synchronous UI work, allocations and timings; does not measure retained/native memory, background work, cold start or GPU presentation.",
+    "historicalCompatibility": "Optional counters bind outside measurements; unavailable historical counters are JSON null and are never interpreted as zero.",
+    "originalComparison": {
+      "originalRevision": "f8e0fd38271302a5dba45a2de0f84dcbd457d1dd (dirty)",
+      "optimizedRevision": "e4d6f49be5dcb4c32fb02959f28b4473db1cda2b (dirty)",
+      "originalPackage": "2.4.0-avalloy.11",
+      "pairs": 2,
+      "samplesPerScenarioPerRun": 7,
+      "allocationReductionPercent": {
+        "code-tail-append": 3.4,
+        "code-unchanged-line": 99.9,
+        "search-unchanged-refresh": 93.2,
+        "table-one-cell-change": 68.0
+      },
+      "unchangedTableCellMeasurements": {
+        "original": 96,
+        "optimized": 0,
+        "updates": 16
+      },
+      "interpretation": "Targeted allocation and table work reductions repeated in both pairs. Width-change and construction timing differences changed sign between pairs; no speedup claimed for those controls. Timings remain observations, not gates.",
+      "provenance": "Dirty markers reflect benchmark-only changes. Original tracked source/configuration matched f8e0fd3; optimized product source matched e4d6f49b. Harness/headless-host bytes and report environments matched across both worktrees."
+    }
   }
 }

@@ -56,6 +56,14 @@ class ComparisonTests(unittest.TestCase):
         self.assertIn("n/a (zero baseline)", result)
         self.assertIn("visits: [16] -> [16, 32]", result)
 
+    def test_missing_historical_counter_is_not_reported_as_zero(self):
+        before = self.report()
+        after = copy.deepcopy(before)
+        for sample in before["scenarios"][0]["samples"]:
+            sample["work"]["visits"] = None
+        result = benchmark.compare(before, after)
+        self.assertIn("visits: [] (unavailable in some/all samples) -> [16]", result)
+
 
 if __name__ == "__main__":
     unittest.main()

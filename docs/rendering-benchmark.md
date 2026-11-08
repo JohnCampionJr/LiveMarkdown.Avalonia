@@ -45,8 +45,10 @@ budgets, concurrency and correctness separately.
 Comparisons reject different machines, runtimes, architectures, Avalonia/Markdig versions,
 build configurations, corpora, harness/test-host sources or workload parameters. Product
 revision (including a dirty marker) is recorded but can differ. For an older revision,
-copy the unchanged harness into its isolated worktree; it requires the instrumentation
-introduced with the eight performance fixes. Do not silently replace missing counters.
+copy the unchanged `RepeatableRenderingBenchmarks.cs` into its isolated worktree and
+use this runner's `--repo /absolute/path/to/worktree` option. The test host and package
+versions must also match. No product instrumentation patches are needed: counters absent
+from historical source are reported as JSON `null` and displayed as unavailable, never zero.
 Keep reports as CI/diagnostic artifacts rather than committing machine-specific numbers.
 
 Comparator regression tests: `python3 -B -m unittest discover -s tools -p 'test_rendering_benchmark.py'`.

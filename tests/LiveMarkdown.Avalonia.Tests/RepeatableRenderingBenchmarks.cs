@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
@@ -104,7 +105,8 @@ public class RepeatableRenderingBenchmarks
         var lines = Enumerable.Range(0, CodeLines + Steps).Select(i => $"var value{i:D3} = Compute({i}, \"fixed text\");").ToArray();
         for (var i = 0; i < CodeLines; i++) block.SetLine(i, lines[i]);
         block.HighlightSyntax();
-        long visits = 0;
+        var readVisits = OptionalCounter(block, "LastHighlightLineVisits");
+        long? visits = 0;
         return new Trial(() =>
         {
             for (var i = 0; i < Steps; i++)
@@ -112,7 +114,7 @@ public class RepeatableRenderingBenchmarks
                 var index = append ? CodeLines + i : CodeLines - 1;
                 block.SetLine(index, lines[index]);
                 block.HighlightSyntax();
-                visits += block.LastHighlightLineVisits;
+                visits += readVisits();
             }
         }, () => new() { ["updates"] = Steps, ["formattingLineVisits"] = visits },
             () => Assert.That(block.Code, Is.EqualTo(string.Join(Environment.NewLine, lines.Take(append ? CodeLines + Steps : CodeLines)))));
@@ -127,13 +129,14 @@ public class RepeatableRenderingBenchmarks
         Refresh();
         matcherCalls = 0;
         var matches = renderer.TextSearchMatches;
-        var collections = renderer.RenderedTextBlockCollections;
+        var readCollections = OptionalCounter(renderer, "RenderedTextBlockCollections");
+        var collections = readCollections();
         var layouts = MarkdownTextBlock.TextLayoutsCreated;
         return new Trial(() => { for (var i = 0; i < Steps; i++) Refresh(); }, () => new()
         {
             ["refreshes"] = Steps, ["matcherCalls"] = matcherCalls,
             ["matchListReplaced"] = ReferenceEquals(matches, renderer.TextSearchMatches) ? 0 : 1,
-            ["blockCollections"] = renderer.RenderedTextBlockCollections - collections,
+            ["blockCollections"] = readCollections() - collections,
             ["textLayouts"] = MarkdownTextBlock.TextLayoutsCreated - layouts,
         }, () => Assert.That(renderer.TextSearchMatches, Has.Count.EqualTo(Paragraphs)), window.Close);
         void Refresh()
@@ -211,10 +214,20 @@ public class RepeatableRenderingBenchmarks
         { Measures++; return base.MeasureOverride(availableSize); }
     }
 
-    private sealed class Trial(Action run, Func<Dictionary<string, long>> work, Action check, Action? cleanup = null) : IDisposable
+    // Bind once, outside measurement. Historical product revisions need no instrumentation
+    // patch: counters they did not expose remain null, never a misleading zero.
+    private static Func<int?> OptionalCounter<T>(T instance, string name) where T : class
+    {
+        var getter = typeof(T).GetProperty(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetMethod;
+        if (getter is null) return () => null;
+        var read = getter.CreateDelegate<Func<T, int>>();
+        return () => read(instance);
+    }
+
+    private sealed class Trial(Action run, Func<Dictionary<string, long?>> work, Action check, Action? cleanup = null) : IDisposable
     {
         internal Action Run => run;
-        internal Func<Dictionary<string, long>> Work => work;
+        internal Func<Dictionary<string, long?>> Work => work;
         internal Action Check => check;
         public void Dispose() => cleanup?.Invoke();
     }
