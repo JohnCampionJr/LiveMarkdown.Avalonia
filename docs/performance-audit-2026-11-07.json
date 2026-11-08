@@ -1,0 +1,479 @@
+{
+  "date": "2026-11-07",
+  "packageBaseline": "2.4.0-avalloy.11",
+  "sourceCommit": "b6d926163e159f7751ae5d1027c376d42aa6db65",
+  "productCodeChanged": true,
+  "probeFile": "tests/LiveMarkdown.Avalonia.Tests/PerformanceAuditProbes.cs",
+  "probeCommand": "dotnet test tests/LiveMarkdown.Avalonia.Tests/LiveMarkdown.Avalonia.Tests.csproj --filter 'FullyQualifiedName~PerformanceAuditProbes' --logger 'console;verbosity=detailed'",
+  "probeResults": {
+    "passed": 2,
+    "failed": 0,
+    "timingAssertions": false
+  },
+  "reviewScope": [
+    "node/control synchronization",
+    "table/text layout",
+    "incremental code highlighting and token caching",
+    "streaming parser/update publication",
+    "search/selection",
+    "image cache/load paths"
+  ],
+  "findings": [
+    {
+      "id": "LM-PERF-01",
+      "priority": "high",
+      "status": "done",
+      "title": "Background token warming can block foreground rendering for an entire code block",
+      "file": "src/LiveMarkdown.Avalonia/Utilities/SyntaxHighlighting.cs",
+      "line": 239,
+      "confirmation": "code-path audit; not attributed to a captured live stall",
+      "evidence": "The shared language instance holds _tokenizeLock around the entire remaining TokenizeLine loop. Prewarm uses that same method. A fully reused live block still enters the lock with no lines to tokenize. Foxery calls Prewarm from its background fence warmer. The one-line maximum-wait comment does not match the critical section.",
+      "fixDirection": "Avoid grammar access when no tokenization is necessary; shorten the shared critical section or isolate worker grammars without breaking cross-line rule stacks.",
+      "validation": "Use a controlled tokenizer and synchronization signals to prove foreground cache hits do not need a background-held grammar lock; no elapsed-time assertions.",
+      "owner": "lm_highlighting_fixes",
+      "validationStatus": "passed final 183-test focused regression selection; no elapsed-time assertions added",
+      "regressionCoverage": [
+        "CodeHighlightingPerformanceTests.Fully_reused_tokens_do_not_acquire_the_grammar_gate",
+        "CodeHighlightingPerformanceTests.A_background_warm_releases_the_gate_between_each_line",
+        "CodeHighlightingPerformanceTests.Foreground_tokenization_can_run_at_a_controlled_background_line_boundary"
+      ],
+      "implementationSummary": "Fully reused token sets bypass the grammar gate; warming releases shared grammar serialization at each line boundary, including alias instances."
+    },
+    {
+      "id": "LM-PERF-02",
+      "priority": "high",
+      "status": "done",
+      "title": "Setting unchanged code text destroys already styled multi-token lines",
+      "file": "src/LiveMarkdown.Avalonia/Controls/CodeBlock.cs",
+      "line": 366,
+      "confirmation": "structural probe",
+      "evidence": {
+        "originalInlineType": "Span",
+        "afterSetInlineType": "Run",
+        "retainedInline": false,
+        "codePreserved": true
+      },
+      "fixDirection": "Compare against retained lineTexts before replacing a styled Span. Preserve the rendered inline tree on no-op writes, while keeping theme changes and source-span updates correct.",
+      "validation": "Assert inline and text-layout identity survives identical line writes, and changed text/themes still update.",
+      "owner": "lm_highlighting_fixes",
+      "validationStatus": "passed final 183-test focused regression selection; no elapsed-time assertions added",
+      "regressionCoverage": [
+        "CodeHighlightingPerformanceTests.Identical_code_assignment_preserves_styled_inlines_and_text_layout",
+        "CodeHighlightingPerformanceTests"
+      ],
+      "implementationSummary": "Identical code writes retain styled inline and text-layout identity. Theme/language/re-registered-theme changes force clean restyling, including single-style runs; mutable external edits retain a conservative path.",
+      "afterEvidence": {
+        "originalInlineType": "Span",
+        "afterSetInlineType": "Span",
+        "retainedInline": true,
+        "codePreserved": true
+      }
+    },
+    {
+      "id": "LM-PERF-03",
+      "priority": "high",
+      "status": "done",
+      "title": "A table height change remeasures unchanged cells at two widths",
+      "file": "src/LiveMarkdown.Avalonia/Controls/MarkdownTableGrid.cs",
+      "line": 109,
+      "confirmation": "measure-execution and constraint probe",
+      "evidence": [
+        {
+          "cell": 0,
+          "changedContent": true,
+          "executions": 3,
+          "constraints": [
+            "160.0",
+            "infinite",
+            "160.0"
+          ]
+        },
+        {
+          "cell": 1,
+          "changedContent": false,
+          "executions": 2,
+          "constraints": [
+            "infinite",
+            "160.0"
+          ]
+        },
+        {
+          "cell": 2,
+          "changedContent": false,
+          "executions": 2,
+          "constraints": [
+            "infinite",
+            "160.0"
+          ]
+        },
+        {
+          "cell": 3,
+          "changedContent": false,
+          "executions": 2,
+          "constraints": [
+            "infinite",
+            "160.0"
+          ]
+        }
+      ],
+      "negativeControl": [
+        {
+          "cell": 0,
+          "explicitlyInvalidated": true,
+          "executions": 1,
+          "constraints": [
+            "160.0"
+          ]
+        },
+        {
+          "cell": 1,
+          "explicitlyInvalidated": false,
+          "executions": 0,
+          "constraints": []
+        },
+        {
+          "cell": 2,
+          "explicitlyInvalidated": false,
+          "executions": 0,
+          "constraints": []
+        },
+        {
+          "cell": 3,
+          "explicitlyInvalidated": false,
+          "executions": 0,
+          "constraints": []
+        }
+      ],
+      "fixDirection": "Retain natural/min-content metrics with explicit content/style invalidation, and avoid alternating stable cells between infinite and fitted constraints on a height-only change.",
+      "validation": "Count actual MeasureOverride executions for unchanged cells; retain wrapping, span, font/theme, and resizing coverage. A same-sized child invalidation alone already avoids the extra work.",
+      "owner": "lm_table_fix",
+      "validationStatus": "passed final 183-test focused regression selection; no elapsed-time assertions added",
+      "implementationSummary": "Natural metrics and lazy min-content floors are retained for observable Markdown cells; width changes rewrap once and stable cells keep their final measure. Content/typography/chrome/structure invalidation and observer teardown are covered. Unsupported custom or embedded-control cells keep the conservative path.",
+      "regressionCoverage": [
+        "TableMeasureCacheTests",
+        "TableWrapTests"
+      ],
+      "afterEvidence": [
+        {
+          "cell": 0,
+          "changedContent": true,
+          "executions": 2
+        },
+        {
+          "cell": 1,
+          "changedContent": false,
+          "executions": 0
+        },
+        {
+          "cell": 2,
+          "changedContent": false,
+          "executions": 0
+        },
+        {
+          "cell": 3,
+          "changedContent": false,
+          "executions": 0
+        }
+      ]
+    },
+    {
+      "id": "LM-PERF-04",
+      "priority": "medium",
+      "status": "done",
+      "title": "Incremental highlighting still scans the full line prefix",
+      "file": "src/LiveMarkdown.Avalonia/Utilities/SyntaxHighlighting.cs",
+      "line": 194,
+      "confirmation": "counted source-line reads",
+      "evidence": [
+        {
+          "originalLines": 32,
+          "firstAppendReads": 34,
+          "nextAppendReads": 35
+        },
+        {
+          "originalLines": 256,
+          "firstAppendReads": 258,
+          "nextAppendReads": 259
+        }
+      ],
+      "fixDirection": "Carry the earliest dirty line from CodeBlock into the token/formatting pipeline, retaining rule-stack propagation and invalidating appropriately for text replacement and theme changes.",
+      "validation": "Assert prefix read/visit counts remain bounded for append-only updates and compare styled output for multiline grammar states. Existing tokenization already reuses prefix tokens; the remaining issue is scans and collection bookkeeping.",
+      "owner": "lm_highlighting_fixes",
+      "validationStatus": "passed final 183-test focused regression selection; no elapsed-time assertions added",
+      "implementationSummary": "CodeBlock supplies authoritative dirty-tail and fixed-chunk hints, preserving owned token prefixes and formatting only affected suffixes. Exposed mutable collections fall back safely; trimming and deferred styling checks also respect dirtiness.",
+      "regressionCoverage": [
+        "CodeHighlightingPerformanceTests.Append_only_highlighting_reads_and_formats_only_the_dirty_tail",
+        "CodeHighlightingPerformanceTests"
+      ],
+      "afterEvidence": [
+        {
+          "originalLines": 32,
+          "firstAppendVisits": 1,
+          "nextAppendVisits": 1
+        },
+        {
+          "originalLines": 256,
+          "firstAppendVisits": 1,
+          "nextAppendVisits": 1
+        }
+      ],
+      "scopeAfterFix": "The authoritative CodeBlock pipeline is bounded; callers supplying arbitrary mutable collections without dirtiness hints intentionally retain safe prefix validation."
+    },
+    {
+      "id": "LM-PERF-05",
+      "priority": "medium",
+      "status": "done",
+      "title": "The shared token cache flushes all entries at capacity and has no aggregate byte/character budget",
+      "file": "src/LiveMarkdown.Avalonia/Utilities/SyntaxHighlighting.cs",
+      "line": 255,
+      "confirmation": "capacity probe plus cache-policy audit",
+      "evidence": {
+        "capacity": 1024,
+        "countDrops": [
+          {
+            "before": 1024,
+            "after": 1
+          }
+        ]
+      },
+      "fixDirection": "Use bounded least-recently-used eviction with text/token retention weights and oversized-entry handling. Keep hot snippets when new background-warmed snippets arrive.",
+      "validation": "Retain a repeatedly used entry while inserting other entries past capacity; enforce weight/count caps without a full-cache cliff.",
+      "owner": "lm_highlighting_fixes",
+      "validationStatus": "passed final 183-test focused regression selection; no elapsed-time assertions added",
+      "regressionCoverage": [
+        "CodeHighlightingPerformanceTests.Token_cache_preserves_hot_entries_and_enforces_count_weight_and_oversize_limits"
+      ],
+      "implementationSummary": "Shared tokens use a thread-safe weighted LRU: 1024-entry cap, 16 MiB estimated retention weight, 512 KiB per-entry admission weight. Entries are immutable before publication; overflow evicts old entries individually.",
+      "afterEvidence": {
+        "capacity": 1024,
+        "countDrops": []
+      }
+    },
+    {
+      "id": "LM-PERF-06",
+      "priority": "medium",
+      "status": "done",
+      "title": "Unchanged active-search refreshes rebuild match collections despite memo hits",
+      "file": "src/LiveMarkdown.Avalonia/Controls/MarkdownRenderer.TextSearch.cs",
+      "line": 283,
+      "confirmation": "allocation and matcher-call probe",
+      "evidence": [
+        {
+          "paragraphs": 20,
+          "refreshes": 5,
+          "matcherCalls": 0,
+          "bytes": 45120,
+          "replacedMatches": true
+        },
+        {
+          "paragraphs": 200,
+          "refreshes": 5,
+          "matcherCalls": 0,
+          "bytes": 431400,
+          "replacedMatches": true
+        }
+      ],
+      "scope": "Requires an active search. No direct ApplyTextSearch callers were found in current Foxery source, so this is a library optimization rather than evidence for the current app lag. Allocations include the complete refresh/layout path, not solely the dictionaries.",
+      "fixDirection": "Retain aggregate results when ordered blocks and memo results are unchanged; update changed blocks without rebuilding every match collection.",
+      "validation": "Assert unchanged refresh preserves the match result collection and performs zero rematches; changing queries, content, block order, and highlights must stay correct.",
+      "owner": "root",
+      "validationStatus": "passed final 183-test focused regression selection; no elapsed-time assertions added",
+      "regressionCoverage": [
+        "SearchRefreshCachingTests",
+        "MarkdownTextSearchTests",
+        "RenderCostTests.Laying_out_an_append_does_not_collect_blocks_or_build_an_unrequested_projection"
+      ],
+      "implementationSummary": "Unchanged ordered blocks/memos/highlights retain the aggregate match collection and emit no replacement notification. Ownership-aware highlights and globally distinct matcher generations keep moved blocks correct; spare collections retain capacity without retired-block references.",
+      "afterEvidence": [
+        {
+          "paragraphs": 20,
+          "refreshes": 5,
+          "matcherCalls": 0,
+          "bytes": 4112,
+          "replacedMatches": false
+        },
+        {
+          "paragraphs": 200,
+          "refreshes": 5,
+          "matcherCalls": 0,
+          "bytes": 29720,
+          "replacedMatches": false
+        }
+      ]
+    },
+    {
+      "id": "LM-PERF-07",
+      "priority": "medium",
+      "status": "done",
+      "title": "RAM image-cache wrapper has no strong owner and disappears across GC",
+      "file": "src/LiveMarkdown.Avalonia/ImageLoader/Caches/RamBasedAsyncImageLoaderCache.cs",
+      "line": 64,
+      "confirmation": "GC lifetime probe",
+      "evidence": {
+        "readerAlive": true,
+        "cacheHitWithRetainedReaderAfterGc": false
+      },
+      "scope": "Image-bearing Markdown. Weak retention is intentional in the current API, but the wrapper is not held even by a live returned cache reader.",
+      "fixDirection": "Offer bounded strong retention, or make weak lifetime follow an actually retained object. Preserve HTTP freshness, no-store, and stream ownership semantics.",
+      "validation": "Prove small reusable entries survive expected GC cycles within budget; verify eviction releases bytes/metadata and honors HTTP validators.",
+      "owner": "lm_image_cache_fixes",
+      "validationStatus": "passed final 183-test focused regression selection; no elapsed-time assertions added",
+      "regressionCoverage": [
+        "RamImageCacheRetentionTests",
+        "AsyncImageLoaderCacheTests"
+      ],
+      "implementationSummary": "RAM image bytes have strong LRU retention under per-instance 64 MiB / 128-entry defaults. Readers own independent streams/metadata; validators, no-store, cancellation, replacement and budget changes remain correct.",
+      "afterEvidence": {
+        "limit": 1024,
+        "inputBytes": 65536,
+        "bytesReadBeforeReject": 0,
+        "unknownLengthBytesReadBeforeReject": 1025,
+        "retainedReader": true,
+        "cacheHitWithRetainedReaderAfterGc": true
+      }
+    },
+    {
+      "id": "LM-PERF-08",
+      "priority": "medium",
+      "status": "done",
+      "title": "Image-cache entry size is checked after fully buffering the source",
+      "file": "src/LiveMarkdown.Avalonia/ImageLoader/Caches/RamBasedAsyncImageLoaderCache.cs",
+      "line": 49,
+      "confirmation": "counted-stream probe",
+      "evidence": {
+        "limit": 1024,
+        "inputBytes": 65536,
+        "bytesReadBeforeReject": 65536
+      },
+      "fixDirection": "Reject oversized seekable sources before copying; bound buffering of unknown-length sources. Retain the documented nonpositive-limit behavior.",
+      "validation": "Count bytes read and allocation shape for oversized seekable/nonseekable streams, plus cancellation and no-store cases.",
+      "owner": "lm_image_cache_fixes",
+      "validationStatus": "passed final 183-test focused regression selection; no elapsed-time assertions added",
+      "regressionCoverage": [
+        "RamImageCacheRetentionTests"
+      ],
+      "implementationSummary": "Seekable oversized sources are rejected before reading. Unknown-length reads stop at limit+1 bytes; aggregate limits still bound writes if the per-entry cap is disabled.",
+      "afterEvidence": {
+        "limit": 1024,
+        "inputBytes": 65536,
+        "bytesReadBeforeReject": 0,
+        "unknownLengthBytesReadBeforeReject": 1025,
+        "retainedReader": true,
+        "cacheHitWithRetainedReaderAfterGc": true
+      }
+    }
+  ],
+  "notes": [
+    "No full suite or long benchmark run was started.",
+    "These are optimization opportunities, not an attribution of current live-app stalls.",
+    "Full text construction for explicit copy operations was not counted as unnecessary background work.",
+    "Existing incremental parsing, token reuse, shaped-run caching, and lazy text projections were considered rather than rediscovered as missing features."
+  ],
+  "executionNotes": [
+    "Fixes started with LM-PERF-01/02 and LM-PERF-03; independent image/search work proceeds alongside them.",
+    "Baseline 92-test selection: 91 passed, one pre-existing unrequested-projection allocation-ratio assertion failed (11,187 versus 7,192 bytes). Replace that guard with exact per-renderer block-collection/projection-build work assertions and retain allocations as an explicit report."
+  ],
+  "validationRuns": [
+    {
+      "selection": "CodeHighlightingPerformanceTests|SyntaxHighlightingTests|TableMeasureCacheTests|TableWrapTests|SearchRefreshCachingTests|MarkdownTextSearchTests|RamImageCacheRetentionTests|AsyncImageLoaderCacheTests",
+      "passed": 87,
+      "failed": 2,
+      "remainingFailures": [
+        "Changing_viewport_width_rewraps_without_reshaping_natural_measurements",
+        "Nested_children_and_replaced_content_refresh_metrics_and_stop_observing_old_controls"
+      ]
+    },
+    {
+      "selection": "final focused rendering/layout/highlighting/search/selection/image regression selection",
+      "passed": 183,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "selection": "PerformanceAuditProbes",
+      "passed": 2,
+      "failed": 0,
+      "timingAssertions": false
+    },
+    {
+      "selection": "LiveMarkdown.Avalonia Release net8.0 build",
+      "succeeded": true,
+      "errors": 0
+    }
+  ],
+  "workingBranch": "codex/livemarkdown-perf-review",
+  "completionNotes": [
+    "All eight checklist items are implemented and covered by deterministic regressions.",
+    "Baseline allocation-ratio failure was replaced by direct block-walk/projection-build invariants; original allocation measurement remains an explicit report.",
+    "Validation used focused regressions and small audit probes, not the full suite or a long benchmark matrix. Package publication is separate from this fix set.",
+    "Compatibility paths deliberately remeasure unsupported custom/embedded table cells and validate arbitrary externally exposed inline collections."
+  ],
+  "repeatableBenchmark": {
+    "status": "done",
+    "fixture": "tests/LiveMarkdown.Avalonia.Tests/RepeatableRenderingBenchmarks.cs",
+    "runner": "tools/rendering-benchmark.py",
+    "documentation": "docs/rendering-benchmark.md",
+    "workloads": 6,
+    "warmupsPerWorkload": 2,
+    "samplesPerWorkload": 7,
+    "timingAssertions": false,
+    "validation": "Two sequential original/optimized Release pairs passed all six workloads; five deterministic comparator tests passed. Historical source and dependencies were unchanged; only the identical harness was copied into the original worktree.",
+    "scope": "Warm-cache synchronous UI work, allocations and timings; does not measure retained/native memory, background work, cold start or GPU presentation.",
+    "historicalCompatibility": "Optional counters bind outside measurements; unavailable historical counters are JSON null and are never interpreted as zero.",
+    "originalComparison": {
+      "originalRevision": "f8e0fd38271302a5dba45a2de0f84dcbd457d1dd (dirty)",
+      "optimizedRevision": "e4d6f49be5dcb4c32fb02959f28b4473db1cda2b (dirty)",
+      "originalPackage": "2.4.0-avalloy.11",
+      "pairs": 2,
+      "samplesPerScenarioPerRun": 7,
+      "allocationReductionPercent": {
+        "code-tail-append": 3.4,
+        "code-unchanged-line": 99.9,
+        "search-unchanged-refresh": 93.2,
+        "table-one-cell-change": 68.0
+      },
+      "unchangedTableCellMeasurements": {
+        "original": 96,
+        "optimized": 0,
+        "updates": 16
+      },
+      "interpretation": "Targeted allocation and table work reductions repeated in both pairs. Width-change and construction timing differences changed sign between pairs; no speedup claimed for those controls. Timings remain observations, not gates.",
+      "provenance": "Dirty markers reflect benchmark-only changes. Original tracked source/configuration matched f8e0fd3; optimized product source matched e4d6f49b. Harness/headless-host bytes and report environments matched across both worktrees."
+    }
+  },
+  "prReviewFollowups": {
+    "status": "done",
+    "findings": [
+      {
+        "id": "language-round-trip",
+        "status": "done",
+        "fix": "Reset content dirtiness when changing highlighters so returning languages cannot trust another language's prefix hint.",
+        "tests": "Returning_to_a_language_uses_the_current_source_not_its_previous_tokens (manual and automatic)"
+      },
+      {
+        "id": "nested-spans",
+        "status": "done",
+        "fix": "Preserve only tokenizer-compatible flat spans on identical source assignment.",
+        "tests": "Reassigning_source_replaces_nested_spans_before_highlighting_is_enabled"
+      },
+      {
+        "id": "replacement-collections",
+        "status": "done",
+        "fix": "Reconnect replaced inline collections once and unsubscribe the actual observed collection when chunks are removed.",
+        "tests": [
+          "Replacement_inline_collections_are_observed_once_and_retired_collections_are_unsubscribed",
+          "Removing_a_chunk_unsubscribes_its_original_collection_even_if_replaced_while_disabled"
+        ]
+      }
+    ],
+    "reproduction": "All five new deterministic cases failed on eb7406ab before the product fixes; both language cases reproduced the reported Substring exception.",
+    "validation": {
+      "focusedRegressionTests": 36,
+      "failed": 0,
+      "newRegressionCases": 5,
+      "benchmarkWorkloadsPassed": 6,
+      "benchmarkObservation": "Code append/no-op allocations and work counts match the pre-review optimized benchmark exactly (16/0 formatting line visits and 551208/384 allocated bytes). Other workload work counts match; wall-clock timings remain observational.",
+      "fullSuiteRun": false
+    }
+  }
+}

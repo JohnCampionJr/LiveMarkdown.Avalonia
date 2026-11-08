@@ -202,7 +202,10 @@ public class CodeBlock : TemplatedControl
     /// the code is short enough to be one. <see cref="Code"/> reads all of them;
     /// <see cref="CodeTextBlocks"/> is the full list.
     /// </remarks>
-    public InlineCollection Inlines => EnsureChunk(0).Inlines!;
+    public InlineCollection Inlines
+    {
+        get { mutableTextExposed = true; return EnsureChunk(0).Inlines!; }
+    }
 
     /// <summary>
     /// How many lines one text block holds.
@@ -233,9 +236,19 @@ public class CodeBlock : TemplatedControl
     }
 
     /// <summary>Gets the text blocks this code is laid out in, in order.</summary>
-    public IReadOnlyList<MarkdownTextBlock> CodeTextBlocks => chunks;
+    public IReadOnlyList<MarkdownTextBlock> CodeTextBlocks
+    {
+        get { mutableTextExposed = true; return chunks; }
+    }
 
     private readonly List<MarkdownTextBlock> chunks = [];
+    private readonly List<InlineCollection> chunkInlineCollections = [];
+    private int firstDirtyContentLine;
+    private int firstDirtyFormattingLine;
+    private bool mutableTextExposed;
+    internal int LastHighlightLineVisits { get; private set; }
+    internal int LastDeferredChunkVisits { get; private set; }
+    internal int DeferredChunkCount => deferredInlines?.Count ?? 0;
     private Panel? linesPanel;
     private Dictionary<MarkdownTextBlock, InlineCollection>? deferredInlines;
 
@@ -259,9 +272,17 @@ public class CodeBlock : TemplatedControl
     /// <summary>The inline collections of every text block, for one highlighting pass over all of them.</summary>
     private IReadOnlyList<InlineCollection> ChunkInlines()
     {
-        var collections = new InlineCollection[chunks.Count];
-        for (var i = 0; i < chunks.Count; i++) collections[i] = InlinesOf(chunks[i]);
-        return collections;
+        if (!mutableTextExposed) return chunkInlineCollections;
+        for (var i = 0; i < chunks.Count; i++)
+        {
+            var current = InlinesOf(chunks[i]);
+            var previous = chunkInlineCollections[i];
+            if (ReferenceEquals(previous, current)) continue;
+            previous.CollectionChanged -= HandleInlinesChanged;
+            current.CollectionChanged += HandleInlinesChanged;
+            chunkInlineCollections[i] = current;
+        }
+        return chunkInlineCollections;
     }
 
     /// <summary>Creates text blocks up to and including <paramref name="index"/>, and returns that one.</summary>
@@ -286,9 +307,10 @@ public class CodeBlock : TemplatedControl
             // UI font. TextWrapping is not an inherited property at all.
             block.Bind(TemplatedControl.FontFamilyProperty, this.GetObservable(FontFamilyProperty));
             block.Bind(TextBlock.TextWrappingProperty, this.GetObservable(TextWrappingProperty));
-            if (AutoSyntaxHighlight) block.Inlines!.CollectionChanged += HandleInlinesChanged;
+            block.Inlines!.CollectionChanged += HandleInlinesChanged;
 
             chunks.Add(block);
+            chunkInlineCollections.Add(block.Inlines);
             AttachChunk(chunks.Count - 1);
         }
 
@@ -371,6 +393,18 @@ public class CodeBlock : TemplatedControl
         var indexInChunk = lineIndex % LinesPerChunk;
         var offset = indexInChunk * 2;
 
+        // Styled lines are Spans, not Runs. Keep the complete rendered tree on a no-op, but
+        // validate its current text too: public inline collections may have been edited externally.
+        var textOffset = 0;
+        if (!forceLineFormatting && lineIndex < lineTexts.Count && offset < inlines.Count &&
+            string.Equals(lineTexts[lineIndex], text, StringComparison.Ordinal) &&
+            LineMatches(inlines[offset], text, ref textOffset) && textOffset == text.Length) return;
+
+        var changedContent = lineIndex >= lineTexts.Count || !string.Equals(lineTexts[lineIndex], text, StringComparison.Ordinal);
+        if (changedContent) firstDirtyContentLine = Math.Min(firstDirtyContentLine, lineIndex);
+        firstDirtyFormattingLine = Math.Min(firstDirtyFormattingLine, lineIndex);
+        using var ownEdit = SuspendSyntaxHighlighting();
+
         // A chunk alternates Run, LineBreak, Run ... so a line sits at an even index. Fill any gap,
         // which only arises if a caller skips a line.
         while (inlines.Count < offset)
@@ -383,17 +417,17 @@ public class CodeBlock : TemplatedControl
             if (indexInChunk > 0 && inlines[offset - 1] is not LineBreak) inlines[offset - 1] = new LineBreak();
             inlines.Add(new Run(text));
         }
-        else if (inlines[offset] is Run existing)
+        else if (inlines[offset] is Run existing && !forceLineFormatting && !SyntaxHighlighting.IsRunFormatted(existing))
         {
             if (!string.Equals(existing.Text, text, StringComparison.Ordinal))
             {
                 existing.Text = text;
-                existing.Classes.Remove(SyntaxHighlighting.FormattedClassName);
             }
         }
         else
         {
-            // A formatted line is a Span of styled runs; rewriting it starts again from plain text.
+            // A changed or explicitly restyled line starts from plain text. Reusing a formerly
+            // styled single Run would keep local font/background values absent from the new style.
             inlines[offset] = new Run(text);
         }
 
@@ -407,15 +441,22 @@ public class CodeBlock : TemplatedControl
     /// <summary>Drops every line at or past <paramref name="count"/>.</summary>
     internal void TrimLines(int count)
     {
+        if (count == lineTexts.Count && !mutableTextExposed) return;
+        firstDirtyContentLine = Math.Min(firstDirtyContentLine, count);
+        firstDirtyFormattingLine = Math.Min(firstDirtyFormattingLine, count);
+        using var ownEdit = SuspendSyntaxHighlighting();
         var neededChunks = count == 0 ? 0 : (count - 1) / LinesPerChunk + 1;
         while (chunks.Count > neededChunks)
         {
             var block = chunks[^1];
-            if (InlinesOf(block) is { } inlines) inlines.CollectionChanged -= HandleInlinesChanged;
+            // This is the subscribed collection, which may differ from the block's current
+            // collection when it was replaced externally while highlighting was disabled.
+            chunkInlineCollections[^1].CollectionChanged -= HandleInlinesChanged;
             if (deferredInlines?.Remove(block) == true)
                 block.EffectiveViewportChanged -= OnDeferredChunkViewportChanged;
             linesPanel?.Children.Remove(block);
             chunks.RemoveAt(chunks.Count - 1);
+            chunkInlineCollections.RemoveAt(chunkInlineCollections.Count - 1);
         }
 
         if (chunks.Count > 0)
@@ -453,7 +494,10 @@ public class CodeBlock : TemplatedControl
     /// Gets the first <see cref="MarkdownTextBlock"/> holding this code, or null before any line is
     /// set. A long block has more; see <see cref="CodeTextBlocks"/>.
     /// </summary>
-    public MarkdownTextBlock? CodeTextBlock => chunks.Count > 0 ? chunks[0] : null;
+    public MarkdownTextBlock? CodeTextBlock
+    {
+        get { mutableTextExposed = true; return chunks.Count > 0 ? chunks[0] : null; }
+    }
 
     /// <summary>
     /// Gets or sets the Markdown source span represented by the code text layout.
@@ -473,6 +517,36 @@ public class CodeBlock : TemplatedControl
     private IDisposable? _copyButtonClickedSubscription;
     private bool isApplyingSyntaxHighlighting; // prevent re-entrance
     private int suspendedHighlightCount;
+    private string? highlightedLanguage;
+    private ThemeName highlightedTheme;
+    private string? highlightedCustomTheme;
+    private int highlightedThemeRevision;
+
+    private bool forceLineFormatting;
+
+    private void ResetLineFormatting()
+    {
+        forceLineFormatting = true;
+        try { Code = Code; }
+        finally { forceLineFormatting = false; }
+    }
+
+    private static bool LineMatches(Inline inline, string text, ref int offset)
+    {
+        if (inline is Run run)
+        {
+            var value = run.Text ?? string.Empty;
+            if (offset > text.Length - value.Length || !text.AsSpan(offset, value.Length).SequenceEqual(value.AsSpan())) return false;
+            offset += value.Length;
+            return true;
+        }
+        if (inline is not Span span) return false;
+        foreach (var child in span.Inlines)
+            // The tokenizer's fallback extracts direct Runs only. Preserve its flat styled
+            // spans, but normalize externally supplied nested trees before re-highlighting.
+            if (child is not Run || !LineMatches(child, text, ref offset)) return false;
+        return true;
+    }
 
     /// <summary>
     /// How many times this block has walked itself to highlight. A rewrite of the inlines should
@@ -489,9 +563,12 @@ public class CodeBlock : TemplatedControl
 
     private void HandleInlinesChanged(object? sender, NotifyCollectionChangedEventArgs e)
     {
-        if (suspendedHighlightCount > 0) return;
-
-        HighlightSyntax();
+        if (suspendedHighlightCount > 0 || isApplyingSyntaxHighlighting) return;
+        // Externally edited collections no longer have authoritative line metadata. Keep the
+        // safe text-comparison path for this mutable view, including when highlighting is disabled.
+        mutableTextExposed = true;
+        firstDirtyContentLine = firstDirtyFormattingLine = 0;
+        if (AutoSyntaxHighlight) HighlightSyntax();
     }
 
     /// <summary>
@@ -575,21 +652,15 @@ public class CodeBlock : TemplatedControl
         }
         else if (change.Property == ColorThemeProperty)
         {
-            if (AutoSyntaxHighlight) Code = Code; // re-apply syntax highlighting
+            if (AutoSyntaxHighlight) HighlightSyntax();
         }
         else if (change.Property == CustomColorThemeProperty)
         {
-            if (AutoSyntaxHighlight) Code = Code; // re-apply syntax highlighting
+            if (AutoSyntaxHighlight) HighlightSyntax();
         }
         else if (change.Property == AutoSyntaxHighlightProperty)
         {
-            foreach (var chunk in chunks)
-            {
-                if (InlinesOf(chunk) is not { } chunkInlines) continue;
-
-                if (change.NewValue is true) chunkInlines.CollectionChanged += HandleInlinesChanged;
-                else chunkInlines.CollectionChanged -= HandleInlinesChanged;
-            }
+            if (change.NewValue is true) HighlightSyntax();
         }
         else if (change.Property == IsCodeWrappedProperty)
         {
@@ -620,25 +691,59 @@ public class CodeBlock : TemplatedControl
     public void HighlightSyntax()
     {
         if (isApplyingSyntaxHighlighting) return;
-        if (string.IsNullOrWhiteSpace(Language) || LineCount == 0) return;
+        if (string.IsNullOrWhiteSpace(Language) || chunks.Count == 0) return;
 
+        LastDeferredChunkVisits = 0;
+        var firstChangedChunk = 0;
         using var phase = MarkdownRenderDiagnostics.Measure(MarkdownRenderPhase.CodeStyling);
         if (MarkdownRenderDiagnostics.Current is { } metrics) metrics.StylingCalls++;
         SyntaxHighlightPassCount++;
         isApplyingSyntaxHighlighting = true;
         try
         {
-            SyntaxHighlighting.Create(Language.ToLower()).FormatInlines(ChunkInlines(), ColorTheme, CustomColorTheme, lineTexts);
+            var language = Language.ToLowerInvariant();
+            var themeRevision = SyntaxHighlighting.ThemeRevision;
+            // Every language owns a separate live token history. Its previous source may be
+            // older than the dirty hint accumulated for the language we just highlighted.
+            if (highlightedLanguage is not null && highlightedLanguage != language)
+                firstDirtyContentLine = 0;
+            if (highlightedLanguage is not null && (highlightedLanguage != language ||
+                highlightedTheme != ColorTheme || highlightedCustomTheme != CustomColorTheme ||
+                highlightedThemeRevision != themeRevision))
+                ResetLineFormatting();
+            var firstChangedLine = mutableTextExposed ? 0 : firstDirtyFormattingLine;
+            firstChangedChunk = firstChangedLine >= lineTexts.Count ? chunks.Count : firstChangedLine / LinesPerChunk;
+            var highlighter = SyntaxHighlighting.Create(language);
+            highlighter.FormatInlines(ChunkInlines(), ColorTheme, CustomColorTheme,
+                mutableTextExposed ? null : lineTexts,
+                mutableTextExposed ? null : firstDirtyContentLine,
+                mutableTextExposed ? null : LinesPerChunk,
+                mutableTextExposed ? null : firstDirtyFormattingLine);
+            LastHighlightLineVisits = highlighter.LastFormattingLineVisits;
+            firstDirtyContentLine = firstDirtyFormattingLine = lineTexts.Count;
+            highlightedLanguage = language;
+            highlightedTheme = ColorTheme;
+            highlightedCustomTheme = CustomColorTheme;
+            // A registration racing this pass must trigger another refresh, even if formatting
+            // already resolved an older theme snapshot before that registration completed.
+            highlightedThemeRevision = themeRevision;
         }
         finally
         {
             isApplyingSyntaxHighlighting = false;
         }
-        if (deferredInlines is { Count: > 0 })
+        if (deferredInlines is { Count: > 0 } deferred)
         {
             // A changed line or theme can introduce typography that the plain layout cannot match.
-            foreach (var chunk in deferredInlines.Where(pair => !CanDefer(pair.Value)).Select(pair => pair.Key).ToArray())
-                RestoreChunkStyling(chunk);
+            // Unchanged prefix chunks have already passed this check. Theme/language resets start
+            // at zero; an append checks only its tail rather than walking every offscreen inline.
+            for (var i = firstChangedChunk; i < chunks.Count; i++)
+            {
+                var chunk = chunks[i];
+                if (!deferred.TryGetValue(chunk, out var inlines)) continue;
+                LastDeferredChunkVisits++;
+                if (!CanDefer(inlines)) RestoreChunkStyling(chunk);
+            }
         }
     }
 

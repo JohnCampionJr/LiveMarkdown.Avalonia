@@ -1,4 +1,5 @@
 ﻿using Avalonia;
+using System.Collections.Specialized;
 using Avalonia.Controls;
 using Avalonia.VisualTree;
 
@@ -15,6 +16,39 @@ public class MarkdownTableGrid : Panel
 {
     private readonly Dictionary<int, double> _rowHeights = new();
     private readonly Dictionary<int, double> _colWidths = new();
+    private readonly Dictionary<Control, TableCellMeasureCache> _cellMeasures = new();
+    internal int CachedCellMeasureCount => _cellMeasures.Count;
+
+    /// <inheritdoc/>
+    protected override void ChildrenChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        base.ChildrenChanged(sender, e);
+        if (e.Action == NotifyCollectionChangedAction.Reset)
+        {
+            foreach (var state in _cellMeasures.Values) state.Dispose();
+            _cellMeasures.Clear();
+        }
+        else if (e.Action is NotifyCollectionChangedAction.Remove or NotifyCollectionChangedAction.Replace && e.OldItems is not null)
+        {
+            foreach (Control removed in e.OldItems)
+                if (_cellMeasures.Remove(removed, out var state)) state.Dispose();
+        }
+    }
+
+    /// <inheritdoc/>
+    protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
+    {
+        foreach (var state in _cellMeasures.Values) state.Dispose();
+        _cellMeasures.Clear();
+        base.OnDetachedFromVisualTree(e);
+    }
+
+    /// <inheritdoc/>
+    protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
+    {
+        base.OnAttachedToVisualTree(e);
+        InvalidateMeasure();
+    }
 
     /// <summary>
     /// Defines the <see cref="ColumnSpacing"/> property.
@@ -113,10 +147,14 @@ public class MarkdownTableGrid : Panel
 
         if (Children.Count == 0) return new Size();
 
-        // Pass 1: Measure all children with infinite space to get their true Auto desired size.
+        // Pass 1: Intrinsic cell widths survive a fitted remeasure. Only a changed cell returns to
+        // infinite width; alternating every stable cell between infinite and fitted constraints
+        // threw away Avalonia's last-measure cache when one other cell grew in height.
         foreach (var child in Children)
         {
-            child?.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            if (!_cellMeasures.TryGetValue(child, out var state))
+                _cellMeasures.Add(child, state = new(this, child));
+            state.MeasureNatural();
         }
 
         // Pass 2: Column widths from single-cell elements (Span == 1)
@@ -126,7 +164,7 @@ public class MarkdownTableGrid : Panel
             if (Math.Max(1, Grid.GetColumnSpan(child)) != 1) continue;
 
             var col = Grid.GetColumn(child);
-            var width = child.DesiredSize.Width;
+            var width = _cellMeasures[child].NaturalSize.Width;
             _colWidths[col] = _colWidths.TryGetValue(col, out var w) ? Math.Max(w, width) : width;
         }
 
@@ -151,7 +189,7 @@ public class MarkdownTableGrid : Panel
                 currentSpannedWidth += _colWidths[targetCol];
             }
 
-            var extraWidth = child.DesiredSize.Width - currentSpannedWidth;
+            var extraWidth = _cellMeasures[child].NaturalSize.Width - currentSpannedWidth;
             if (extraWidth > 0)
             {
                 // Distribute the extra required width equally across all spanned columns
@@ -170,16 +208,17 @@ public class MarkdownTableGrid : Panel
         {
             FitColumns(budget, MeasureMinContentWidths());
 
-            foreach (var child in Children)
-            {
-                if (child == null) continue;
+        }
 
-                var width = SpannedWidth(Grid.GetColumn(child), Math.Max(1, Grid.GetColumnSpan(child)));
-                if (width < child.DesiredSize.Width)
-                {
-                    child.Measure(new Size(width, double.PositiveInfinity));
-                }
-            }
+        // A cached natural width does not mean the cell is currently measured naturally: it can
+        // still hold the previous narrow viewport's wrapped size. Always request the final
+        // constraint; unchanged cells hit Avalonia's normal cache, and a resize rewraps once.
+        foreach (var child in Children)
+        {
+            var state = _cellMeasures[child];
+            var width = SpannedWidth(Grid.GetColumn(child), Math.Max(1, Grid.GetColumnSpan(child)));
+            child.Measure(new Size(width < state.NaturalSize.Width ? width : double.PositiveInfinity, double.PositiveInfinity));
+            state.LastMeasuredSize = child.DesiredSize;
         }
 
         // Pass 5: Row heights from single-row elements, at their final widths
@@ -250,15 +289,8 @@ public class MarkdownTableGrid : Panel
         {
             if (child == null || Math.Max(1, Grid.GetColumnSpan(child)) != 1) continue;
 
-            var cellWidth = child.DesiredSize.Width;
-            var cellMin = 0.0;
-            foreach (var block in child.GetVisualDescendants().OfType<MarkdownTextBlock>())
-            {
-                var chrome = Math.Max(0, cellWidth - block.DesiredSize.Width);
-                cellMin = Math.Max(cellMin, Math.Min(cellWidth, block.MeasureLongestWord() + chrome));
-            }
-
             var col = Grid.GetColumn(child);
+            var cellMin = _cellMeasures[child].MinContentWidth;
             minContent[col] = minContent.TryGetValue(col, out var w) ? Math.Max(w, cellMin) : cellMin;
         }
 

@@ -1,9 +1,10 @@
+using System.Buffers;
 using System.Security.Cryptography;
 
 namespace LiveMarkdown.Avalonia;
 
 /// <summary>
-/// An in-memory image byte cache backed by weak references.
+/// An in-memory image byte cache with bounded, least-recently-used retention.
 /// </summary>
 public class RamBasedAsyncImageLoaderCache : AsyncImageLoaderCache
 {
@@ -16,22 +17,73 @@ public class RamBasedAsyncImageLoaderCache : AsyncImageLoaderCache
     /// Gets or sets the maximum cached entry size in bytes. Entries larger than
     /// this value are ignored. Set to 0 or a negative value to disable the limit.
     /// </summary>
-    public static long MaxEntrySizeBytes { get; set; } = 32L * 1024L * 1024L;
+    public static long MaxEntrySizeBytes
+    {
+        get => Volatile.Read(ref s_maxEntrySizeBytes);
+        set => Volatile.Write(ref s_maxEntrySizeBytes, value);
+    }
 
-    private readonly Dictionary<Uri, WeakReference<RamCacheEntry>> _cache = new();
+    private static long s_maxEntrySizeBytes = 32L * 1024L * 1024L;
 
-    private int _checkThreshold = 16;
+    /// <summary>
+    /// Gets or sets this cache's aggregate retained-byte limit. Must be positive; defaults to 64 MiB.
+    /// Reducing the limit immediately removes the least recently used entries until it is satisfied.
+    /// This bound also limits an individual write when <see cref="MaxEntrySizeBytes"/> is disabled.
+    /// </summary>
+    public long MaxCacheSizeBytes
+    {
+        get { lock (_gate) return _maxCacheSizeBytes; }
+        set
+        {
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(value);
+            lock (_gate)
+            {
+                _maxCacheSizeBytes = value;
+                TrimToBudget();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Gets or sets this cache's retained-entry limit. Must be positive; defaults to 128.
+    /// Readers own their streams and can finish reading an entry after its cache slot is evicted.
+    /// </summary>
+    public int MaxCacheEntries
+    {
+        get { lock (_gate) return _maxCacheEntries; }
+        set
+        {
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(value);
+            lock (_gate)
+            {
+                _maxCacheEntries = value;
+                TrimToBudget();
+            }
+        }
+    }
+
+    private readonly object _gate = new();
+    private readonly Dictionary<Uri, LinkedListNode<RamCacheEntry>> _cache = new();
+    private readonly LinkedList<RamCacheEntry> _oldestFirst = new();
+    private long _maxCacheSizeBytes = 64L * 1024L * 1024L;
+    private int _maxCacheEntries = 128;
+    private long _retainedBytes;
+
+    internal int CachedEntryCount { get { lock (_gate) return _cache.Count; } }
+    internal long CachedByteCount { get { lock (_gate) return _retainedBytes; } }
 
     /// <inheritdoc/>
     public override Task<AsyncImageLoaderCacheEntry?> GetAsync(Uri uri, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        lock (_cache)
+        lock (_gate)
         {
-            if (_cache.TryGetValue(uri, out var weakRef) && weakRef.TryGetTarget(out var cachedEntry))
+            if (_cache.TryGetValue(uri, out var node))
             {
+                var cachedEntry = node.Value;
                 cachedEntry.Metadata.LastAccessedAt = DateTimeOffset.UtcNow;
+                MarkUsed(node);
                 return Task.FromResult<AsyncImageLoaderCacheEntry?>(
                     new AsyncImageLoaderCacheEntry(new MemoryStream(cachedEntry.Bytes, false), cachedEntry.Metadata.Clone()));
             }
@@ -44,13 +96,27 @@ public class RamBasedAsyncImageLoaderCache : AsyncImageLoaderCache
     public override async Task SetAsync(Uri uri, Stream stream, AsyncImageLoaderCacheMetadata metadata, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (metadata.NoStore) return;
+        if (metadata.NoStore)
+        {
+            await RemoveAsync(uri, cancellationToken).ConfigureAwait(false);
+            return;
+        }
 
-        using var memoryStream = new MemoryStream();
-        await stream.CopyToAsync(memoryStream, cancellationToken);
-        if (MaxEntrySizeBytes > 0 && memoryStream.Length > MaxEntrySizeBytes) return;
+        long limit;
+        lock (_gate) limit = WriteLimit();
+        if (stream.CanSeek && stream.Length - stream.Position > limit)
+        {
+            await RemoveAsync(uri, cancellationToken).ConfigureAwait(false);
+            return;
+        }
 
-        var bytes = memoryStream.ToArray();
+        var bytes = await ReadBoundedAsync(stream, limit, cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (bytes is null)
+        {
+            await RemoveAsync(uri, cancellationToken).ConfigureAwait(false);
+            return;
+        }
         var now = DateTimeOffset.UtcNow;
         var storedMetadata = metadata.Clone();
         storedMetadata.SourceUri = uri.OriginalString;
@@ -59,10 +125,15 @@ public class RamBasedAsyncImageLoaderCache : AsyncImageLoaderCache
         storedMetadata.Length = bytes.LongLength;
         storedMetadata.BodyHash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
 
-        lock (_cache)
+        lock (_gate)
         {
-            _cache[uri] = new WeakReference<RamCacheEntry>(new RamCacheEntry(bytes, storedMetadata));
-            CleanDeadEntriesIfNeeded();
+            cancellationToken.ThrowIfCancellationRequested();
+            // A limit can be reduced while an asynchronous read is in flight. Recheck before publication.
+            Remove(uri);
+            if (bytes.LongLength > WriteLimit()) return;
+            _cache.Add(uri, _oldestFirst.AddLast(new RamCacheEntry(uri, bytes, storedMetadata)));
+            _retainedBytes += bytes.LongLength;
+            TrimToBudget();
         }
     }
 
@@ -71,11 +142,16 @@ public class RamBasedAsyncImageLoaderCache : AsyncImageLoaderCache
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        lock (_cache)
+        lock (_gate)
         {
-            if (_cache.TryGetValue(uri, out var weakRef) && weakRef.TryGetTarget(out var cachedEntry))
+            if (metadata.NoStore)
             {
-                cachedEntry.Metadata.UpdateFromValidation(metadata);
+                Remove(uri);
+            }
+            else if (_cache.TryGetValue(uri, out var node))
+            {
+                node.Value.Metadata.UpdateFromValidation(metadata);
+                MarkUsed(node);
             }
         }
 
@@ -87,9 +163,9 @@ public class RamBasedAsyncImageLoaderCache : AsyncImageLoaderCache
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        lock (_cache)
+        lock (_gate)
         {
-            _cache.Remove(uri);
+            Remove(uri);
         }
 
         return Task.CompletedTask;
@@ -100,27 +176,61 @@ public class RamBasedAsyncImageLoaderCache : AsyncImageLoaderCache
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        lock (_cache)
+        lock (_gate)
         {
             _cache.Clear();
+            _oldestFirst.Clear();
+            _retainedBytes = 0;
         }
 
         return Task.CompletedTask;
     }
 
-    private void CleanDeadEntriesIfNeeded()
+    private long WriteLimit()
     {
-        if (_cache.Count <= _checkThreshold) return;
-
-        var keysToRemove = _cache.Where(kvp => !kvp.Value.TryGetTarget(out _)).Select(kvp => kvp.Key).ToList();
-        foreach (var key in keysToRemove)
-        {
-            _cache.Remove(key);
-        }
-
-        if (_cache.Count > _checkThreshold) _checkThreshold *= 2;
-        else if (_cache.Count < _checkThreshold / 4) _checkThreshold = Math.Max(16, _checkThreshold / 2);
+        var perEntry = MaxEntrySizeBytes;
+        return Math.Min(int.MaxValue, perEntry > 0 ? Math.Min(perEntry, _maxCacheSizeBytes) : _maxCacheSizeBytes);
     }
 
-    private sealed record RamCacheEntry(byte[] Bytes, AsyncImageLoaderCacheMetadata Metadata);
+    private static async Task<byte[]?> ReadBoundedAsync(Stream stream, long limit, CancellationToken cancellationToken)
+    {
+        // For unknown lengths read at most one byte beyond the bound, without buffering that extra byte.
+        // Known oversized sources are rejected before arriving here. The caller keeps ownership of stream.
+        using var memory = new MemoryStream();
+        var buffer = ArrayPool<byte>.Shared.Rent((int)Math.Min(81920, limit + 1));
+        try
+        {
+            while (true)
+            {
+                var remaining = limit - memory.Length;
+                var wanted = (int)Math.Min(buffer.Length, remaining + 1);
+                var read = await stream.ReadAsync(buffer.AsMemory(0, wanted), cancellationToken).ConfigureAwait(false);
+                if (read == 0) return memory.ToArray();
+                if (read > remaining) return null;
+                memory.Write(buffer, 0, read);
+            }
+        }
+        finally { ArrayPool<byte>.Shared.Return(buffer); }
+    }
+
+    private void MarkUsed(LinkedListNode<RamCacheEntry> node)
+    {
+        _oldestFirst.Remove(node);
+        _oldestFirst.AddLast(node);
+    }
+
+    private void Remove(Uri uri)
+    {
+        if (!_cache.Remove(uri, out var node)) return;
+        _oldestFirst.Remove(node);
+        _retainedBytes -= node.Value.Bytes.LongLength;
+    }
+
+    private void TrimToBudget()
+    {
+        while ((_cache.Count > _maxCacheEntries || _retainedBytes > _maxCacheSizeBytes) && _oldestFirst.First is { } node)
+            Remove(node.Value.Uri);
+    }
+
+    private sealed record RamCacheEntry(Uri Uri, byte[] Bytes, AsyncImageLoaderCacheMetadata Metadata);
 }

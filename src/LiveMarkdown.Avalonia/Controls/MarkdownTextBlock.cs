@@ -513,6 +513,8 @@ public partial class MarkdownTextBlock : SelectableTextBlock
     /// a streaming block to. Read by the cost tests.
     /// </summary>
     internal static int TextLayoutsCreated;
+    internal event Action? IntrinsicMeasureInvalidated;
+    internal int LongestWordMeasureCount { get; private set; }
 
     /// <inheritdoc/>
     protected override TextLayout CreateTextLayout(string? text)
@@ -538,6 +540,7 @@ public partial class MarkdownTextBlock : SelectableTextBlock
     /// </remarks>
     internal double MeasureLongestWord()
     {
+        LongestWordMeasureCount++;
         using var layout = CreateTextLayout(Text, TextWrapping.NoWrap, double.PositiveInfinity, double.PositiveInfinity, null);
         // LayoutText, not ActualText: an embedded control (an inline icon or swatch) holds one position in the
         // layout but none in the logical text, so ActualText's indices drift from the layout's after it.
@@ -2488,6 +2491,7 @@ public partial class MarkdownTextBlock : SelectableTextBlock
         var textRuns = _textRuns;
         base.OnMeasureInvalidated();
         _textRuns = textRuns;
+        IntrinsicMeasureInvalidated?.Invoke();
     }
 
     private static void InvalidateRendererTextState(Visual? visual)
